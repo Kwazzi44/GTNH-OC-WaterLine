@@ -70,17 +70,37 @@ for key, controllerConfig in pairs(config.controllers) do
   end
 end
 
-mainLogger:info("Все потоки запущены. Нажмите 'Q' для выхода.")
+mainLogger:info("Все потоки запущены. Инициализация GUI...")
 
--- Ожидание выхода
+local gui = require("lib.gui")
+local state = require("lib.state")
+
+gui.init()
+gui.drawLayout()
+
+-- Ожидание выхода и обновление экрана
 while true do
-  local ev, _, _, keyCode = event.pull("key_up")
-  if keyCode == keyboard.keys.q then
+  local ev, _, _, keyCode = event.pull(0.5, "key_up")
+  
+  if ev == "key_up" and keyCode == keyboard.keys.q then
+    -- Восстанавливаем цвета терминала перед выходом
+    local comp = require("component")
+    if comp.gpu then
+      comp.gpu.setBackground(0x000000)
+      comp.gpu.setForeground(0xFFFFFF)
+      require("term").clear()
+    end
+    
     mainLogger:info("Получен сигнал выхода (Q). Останавливаем потоки...")
     for _, t in ipairs(threads) do
       pcall(t.kill, t)
     end
     break
+  end
+  
+  -- Обновляем карточки из state
+  for tier, data in pairs(state) do
+    gui.updateCardStatus(tier, data.status, data.color)
   end
 end
 

@@ -52,6 +52,12 @@ function t3controller:new(config, logger)
     end
 
     self.logger:info("Инициализация завершена. Начальное состояние: idle.")
+    
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+    stateMod.t3.status = "IDLE"
+    stateMod.t3.color = theme.C.text
+    
     return true
   end
 
@@ -64,15 +70,22 @@ function t3controller:new(config, logger)
     local consumed = getConsumedCount()
     self.logger:debug(string.format("Статус: %s, Работа: %s, Потреблено: %s", self.state, tostring(hasWork), tostring(consumed)))
 
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+
     if self.state == "idle" then
       if hasWork then
         self.logger:info("Обнаружена работа. Переход в work.")
         self.state = "work"
+        stateMod.t3.status = "WORKING"
+        stateMod.t3.color = theme.C.warn
       end
     elseif self.state == "work" then
       if consumed and consumed >= (self.config.requiredCount or 900000) then
         self.logger:info("Потреблено достаточное количество. Переход в waitEnd.")
         self.state = "waitEnd"
+        stateMod.t3.status = "WAITING"
+        stateMod.t3.color = theme.C.partial
         return
       end
 
@@ -81,17 +94,23 @@ function t3controller:new(config, logger)
       
       self.logger:info("Переход в waitEnd.")
       self.state = "waitEnd"
+      stateMod.t3.status = "WAITING"
+      stateMod.t3.color = theme.C.partial
     elseif self.state == "waitEnd" then
       self.logger:info("Ожидание события cycle_end...")
       local ev, arg = event.pull(10, "cycle_end")
       if ev then
         self.logger:info("Получено событие cycle_end. Возврат в idle.")
         self.state = "idle"
+        stateMod.t3.status = "IDLE"
+        stateMod.t3.color = theme.C.text
       else
         self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
         if not hasWork then
           self.logger:info("Машина не работает. Возврат в idle.")
           self.state = "idle"
+          stateMod.t3.status = "IDLE"
+          stateMod.t3.color = theme.C.text
         end
       end
     end
