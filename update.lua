@@ -15,6 +15,7 @@ local FILES = {
   { "/lib/logger.lua",          "/home/lib/logger.lua"          },
   { "/lib/theme.lua",           "/home/lib/theme.lua"           },
   { "/lib/gui.lua",             "/home/lib/gui.lua"             },
+  { "/lib/state.lua",           "/home/lib/state.lua"           },
   { "/src/line-controller.lua", "/home/src/line-controller.lua" },
   { "/src/t3-controller.lua",   "/home/src/t3-controller.lua"   },
   { "/src/t4-controller.lua",   "/home/src/t4-controller.lua"   },
