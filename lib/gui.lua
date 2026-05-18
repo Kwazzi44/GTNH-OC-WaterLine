@@ -18,8 +18,11 @@ function gui.drawLayout()
   -- Рисуем шапку и подвал
   theme.drawHeader("WATER LINE CONTROL", "PARALLEL SYSTEM")
   theme.drawFooter({
+    {"F1", "Setup"},
+    {"F3", "Redraw"},
+    {"F4", "Logs"},
+    {"F5", "Update"},
     {"Q", "Quit"},
-    {"T", "Toggle Tier"},
   })
   
   -- Рисуем сетку карточек для 6 тиров (T3 - T8)

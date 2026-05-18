@@ -82,20 +82,57 @@ gui.drawLayout()
 while true do
   local ev, _, _, keyCode = event.pull(0.5, "key_up")
   
-  if ev == "key_up" and keyCode == keyboard.keys.q then
-    -- Восстанавливаем цвета терминала перед выходом
-    local comp = require("component")
-    if comp.gpu then
-      comp.gpu.setBackground(0x000000)
-      comp.gpu.setForeground(0xFFFFFF)
-      require("term").clear()
+  if ev == "key_up" then
+    if keyCode == keyboard.keys.q then
+      -- Восстанавливаем цвета терминала перед выходом
+      local comp = require("component")
+      if comp.gpu then
+        comp.gpu.setBackground(0x000000)
+        comp.gpu.setForeground(0xFFFFFF)
+        require("term").clear()
+      end
+      
+      mainLogger:info("Получен сигнал выхода (Q). Останавливаем потоки...")
+      for _, t in ipairs(threads) do
+        pcall(t.kill, t)
+      end
+      break
+    elseif keyCode == keyboard.keys.f3 then
+      gui.init()
+      gui.drawLayout()
+    elseif keyCode == keyboard.keys.f4 then
+      -- Открываем файл логов через встроенный редактор
+      local comp = require("component")
+      if comp.gpu then
+        comp.gpu.setBackground(0x000000)
+        comp.gpu.setForeground(0xFFFFFF)
+        require("term").clear()
+      end
+      
+      print("Открытие логов. Нажмите Ctrl+W для выхода из редактора.")
+      os.sleep(1)
+      os.execute("edit /home/parallel_logs.log")
+      
+      -- После выхода из редактора перерисовываем GUI
+      gui.init()
+      gui.drawLayout()
+    elseif keyCode == keyboard.keys.f5 then
+      -- Запуск обновления
+      local comp = require("component")
+      if comp.gpu then
+        comp.gpu.setBackground(0x000000)
+        comp.gpu.setForeground(0xFFFFFF)
+        require("term").clear()
+      end
+      
+      print("Запуск обновления программы...")
+      for _, t in ipairs(threads) do
+        pcall(t.kill, t)
+      end
+      
+      os.execute("lua /home/update.lua")
+      break -- Выходим из программы
     end
-    
-    mainLogger:info("Получен сигнал выхода (Q). Останавливаем потоки...")
-    for _, t in ipairs(threads) do
-      pcall(t.kill, t)
-    end
-    break
   end
   
   -- Обновляем карточки из state
