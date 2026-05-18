@@ -1,4 +1,5 @@
 local logger = {}
+local lineCount = 0
 
 function logger:new(config, prefix)
   local obj = {}
@@ -20,7 +21,14 @@ function logger:new(config, prefix)
       end
 
       if obj.config.file then
-        local f = io.open(obj.config.file, "a")
+        lineCount = lineCount + 1
+        local mode = "a"
+        if lineCount >= 150 then
+          mode = "w" -- Перезаписываем файл, если достигли 150 строк
+          lineCount = 1
+        end
+
+        local f = io.open(obj.config.file, mode)
         if f then
           f:write(formattedMessage .. "\n")
           f:close()
