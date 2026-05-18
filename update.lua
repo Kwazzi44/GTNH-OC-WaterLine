@@ -11,6 +11,7 @@ end
 -- Список файлов для скачивания (откуда, куда)
 local FILES = {
   { "/config.lua",              "/home/config.lua"              },
+  { "/registry.lua",            "/home/registry.lua"            },
   { "/main.lua",                "/home/main.lua"                },
   { "/lib/logger.lua",          "/home/lib/logger.lua"          },
   { "/lib/theme.lua",           "/home/lib/theme.lua"           },
@@ -51,16 +52,16 @@ end
 io.write("\n==========================================\n")
 io.write("  GTNH Water Line Control — UPDATER       \n")
 io.write("==========================================\n")
-io.write("[NOTE] config.lua is NOT overwritten if it exists.\n\n")
+io.write("[NOTE] config.lua and registry.lua are NOT overwritten if they exist.\n\n")
 
 local ok_n, fail_n = 0, 0
 for _, e in ipairs(FILES) do
   local src_path = e[1]
   local dest_path = e[2]
   
-  -- Проверяем, если это конфиг и он уже есть - пропускаем
-  if src_path == "/config.lua" and filesystem.exists(dest_path) then
-    io.write(string.format("  [SKIPPED] %-35s (Config preserved)\n", dest_path))
+  -- Проверяем, если это конфиг или реестр и они уже есть - пропускаем
+  if (src_path == "/config.lua" or src_path == "/registry.lua") and filesystem.exists(dest_path) then
+    io.write(string.format("  [SKIPPED] %-35s (File preserved)\n", dest_path))
   else
     io.write(string.format("  [..] %-35s", dest_path))
     local ok, err = download(REPO .. src_path, dest_path)
