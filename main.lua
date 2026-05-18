@@ -97,6 +97,22 @@ while true do
         pcall(t.kill, t)
       end
       break
+    elseif keyCode == keyboard.keys.f1 then
+      -- Запуск Setup
+      local comp = require("component")
+      if comp.gpu then
+        comp.gpu.setBackground(0x000000)
+        comp.gpu.setForeground(0xFFFFFF)
+        require("term").clear()
+      end
+      
+      print("Запуск мастера настройки...")
+      os.sleep(1)
+      os.execute("lua /home/setup.lua")
+      
+      -- После выхода из setup перерисовываем GUI
+      gui.init()
+      gui.drawLayout()
     elseif keyCode == keyboard.keys.f3 then
       gui.init()
       gui.drawLayout()
