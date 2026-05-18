@@ -1,77 +1,78 @@
-local component = require("component")
+local REPO = "https://raw.githubusercontent.com/Kwazzi44/GTNH-OC-WaterLine/main"
+
+local component  = require("component")
 local filesystem = require("filesystem")
+local internet   = require("internet")
 
 if not component.isAvailable("internet") then
-  print("Error: Internet card is required!")
-  return
+  io.write("[ERROR] Internet Card not found!\n"); os.exit(1)
 end
 
-local internet = require("internet")
-
--- ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ НА ВАШИ
-local repoUrl = "https://raw.githubusercontent.com/Kwazzi44/GTNH-OC-WaterLine/main/"
-
-local files = {
-  "config.lua", -- Мы проверим его существование отдельно
-  "main.lua",
-  "lib/logger.lua",
-  "src/line-controller.lua",
-  "src/t3-controller.lua",
-  "src/t4-controller.lua",
-  "src/t5-controller.lua",
-  "src/t6-controller.lua",
-  "src/t7-controller.lua",
-  "src/t8-controller.lua"
+-- Список файлов для скачивания (откуда, куда)
+local FILES = {
+  { "/config.lua",              "/home/config.lua"              },
+  { "/main.lua",                "/home/main.lua"                },
+  { "/lib/logger.lua",          "/home/lib/logger.lua"          },
+  { "/lib/theme.lua",           "/home/lib/theme.lua"           },
+  { "/lib/gui.lua",             "/home/lib/gui.lua"             },
+  { "/src/line-controller.lua", "/home/src/line-controller.lua" },
+  { "/src/t3-controller.lua",   "/home/src/t3-controller.lua"   },
+  { "/src/t4-controller.lua",   "/home/src/t4-controller.lua"   },
+  { "/src/t5-controller.lua",   "/home/src/t5-controller.lua"   },
+  { "/src/t6-controller.lua",   "/home/src/t6-controller.lua"   },
+  { "/src/t7-controller.lua",   "/home/src/t7-controller.lua"   },
+  { "/src/t8-controller.lua",   "/home/src/t8-controller.lua"   },
+  { "/update.lua",              "/home/update.lua"              },
+  { "/install.lua",             "/home/install.lua"             },
 }
 
-local function downloadFile(url, path)
-  print("Updating " .. path .. "...")
-  
-  -- Создаем директории, если их нет
-  local dir = path:match("(.+)/[^/]+$")
-  if dir then
+local function mkdirs(dest)
+  local dir = filesystem.path(dest)
+  if dir and dir ~= "/" and not filesystem.exists(dir) then
     filesystem.makeDirectory(dir)
   end
-  
-  local file, err = io.open(path, "w")
-  if not file then
-    print("Failed to open file for writing: " .. tostring(err))
-    return false
-  end
-  
-  local success, response = pcall(internet.request, url)
-  if not success then
-    print("Failed to request URL: " .. tostring(response))
-    file:close()
-    return false
-  end
-  
-  for chunk in response do
-    file:write(chunk)
-  end
-  file:close()
-  print("Updated " .. path)
-  return true
 end
 
-print("Starting update...")
+local function download(url, dest)
+  mkdirs(dest)
 
-for _, file in ipairs(files) do
-  local url = repoUrl .. file
+  -- Анти-кеш (bust)
+  local bust = "?v=" .. tostring(math.random(1000000, 9999999))
+  local ok, err = pcall(function()
+    local resp = internet.request(url .. bust)
+    local f = assert(io.open(dest, "w"))
+    for chunk in resp do f:write(chunk) end
+    f:close()
+  end)
+  return ok, err
+end
+
+io.write("\n==========================================\n")
+io.write("  GTNH Water Line Control — UPDATER       \n")
+io.write("==========================================\n")
+io.write("[NOTE] config.lua is NOT overwritten if it exists.\n\n")
+
+local ok_n, fail_n = 0, 0
+for _, e in ipairs(FILES) do
+  local src_path = e[1]
+  local dest_path = e[2]
   
-  if file == "config.lua" then
-    if filesystem.exists(file) then
-      print("Skipping config.lua to preserve your transposer/adapter IDs.")
-    else
-      print("config.lua not found, downloading default one.")
-      downloadFile(url, file)
-    end
+  -- Проверяем, если это конфиг и он уже есть - пропускаем
+  if src_path == "/config.lua" and filesystem.exists(dest_path) then
+    io.write(string.format("  [SKIPPED] %-35s (Config preserved)\n", dest_path))
   else
-    if not downloadFile(url, file) then
-      print("Update failed at file: " .. file)
-      return
+    io.write(string.format("  [..] %-35s", dest_path))
+    local ok, err = download(REPO .. src_path, dest_path)
+    if ok then
+      io.write("\r  [OK] " .. dest_path .. "\n"); ok_n = ok_n + 1
+    else
+      io.write("\r  [!!] " .. dest_path .. "\n")
+      io.write("       " .. tostring(err) .. "\n"); fail_n = fail_n + 1
     end
   end
 end
 
-print("Update complete!")
+io.write(string.format("\nDone: %d updated, %d failed\n", ok_n, fail_n))
+if fail_n == 0 then
+  io.write("\nUpdate complete! Run: lua /home/main.lua\n\n")
+end
