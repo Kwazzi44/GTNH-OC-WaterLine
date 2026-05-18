@@ -25,6 +25,7 @@ local FILES = {
   { "/src/t7-controller.lua",   "/home/src/t7-controller.lua"   },
   { "/src/t8-controller.lua",   "/home/src/t8-controller.lua"   },
   { "/update.lua",              "/home/update.lua"              },
+  { "/setup.lua",               "/home/setup.lua"               },
   { "/install.lua",             "/home/install.lua"             },
 }
 
