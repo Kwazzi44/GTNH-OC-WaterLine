@@ -32,9 +32,13 @@ function t3controller:new(config, logger)
   function obj:init()
     self.logger:info("Инициализация T3 Controller...")
     
-    for address, name in component.list(self.config.machineName) do
-      self.proxy = component.proxy(address)
-      break
+    -- Ищем компонент типа gt_machine и сверяем имя через getName()
+    for address, name in component.list("gt_machine") do
+      local proxy = component.proxy(address)
+      if proxy and proxy.getName() == self.config.machineName then
+        self.proxy = proxy
+        break
+      end
     end
 
     if not self.proxy then
