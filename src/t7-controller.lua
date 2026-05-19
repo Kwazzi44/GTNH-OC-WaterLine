@@ -117,8 +117,11 @@ function t7controller:new(config, logger)
     
     if sourceSide and sinkSide then
       local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
-      if ok and transferred and transferred > 0 then
-        return true, "fluid", transferred
+      if ok and transferred then
+        local amt = (type(transferred) == "number" and transferred) or amount
+        if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
+          return true, "fluid", amt
+        end
       end
     end
     
@@ -165,8 +168,11 @@ function t7controller:new(config, logger)
     
     if itemSourceSide and itemSinkSide and sourceSlot then
       local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
-      if ok and transferred and transferred > 0 then
-        return true, "item", transferred
+      if ok and transferred then
+        local amt = (type(transferred) == "number" and transferred) or amount
+        if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
+          return true, "item", amt
+        end
       end
     end
     
