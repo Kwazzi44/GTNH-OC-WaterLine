@@ -27,6 +27,57 @@ function t6controller:new(config, logger)
     return nil
   end
 
+  local function findItemInInventory(transposer, side, namePart)
+    local success, size = pcall(transposer.getInventorySize, side)
+    if not success or not size then return nil end
+    local success2, stacks = pcall(transposer.getAllStacks, side)
+    if not success2 or not stacks then return nil end
+    local slot = 1
+    for stack in stacks do
+      if stack and stack.size > 0 then
+        local name = stack.name or ""
+        local label = stack.label or ""
+        local cleanName = name:gsub("§.", ""):lower()
+        local cleanLabel = label:gsub("§.", ""):lower()
+        local cleanQuery = namePart:gsub("§.", ""):lower()
+        if cleanName:find(cleanQuery) or cleanLabel:find(cleanQuery) then
+          return slot, stack
+        end
+      end
+      slot = slot + 1
+    end
+    return nil
+  end
+
+  local function findT6Sides(transposer, requestedLens)
+    local chestSide, machineSide = nil, nil
+    for side = 0, 5 do
+      local success, size = pcall(transposer.getInventorySize, side)
+      if success and size and size > 0 then
+        local slot = findItemInInventory(transposer, side, requestedLens)
+        if slot then
+          chestSide = side
+        else
+          machineSide = side
+        end
+      end
+    end
+    if not chestSide or not machineSide then
+      local sidesWithInv = {}
+      for side = 0, 5 do
+        local success, size = pcall(transposer.getInventorySize, side)
+        if success and size and size > 0 then
+          table.insert(sidesWithInv, side)
+        end
+      end
+      if #sidesWithInv >= 2 then
+        chestSide = sidesWithInv[1]
+        machineSide = sidesWithInv[2]
+      end
+    end
+    return chestSide, machineSide
+  end
+
   function obj:init()
     self.logger:info("Инициализация T6 Controller...")
     
@@ -86,20 +137,49 @@ function t6controller:new(config, logger)
 
       self.logger:info("Требуется линза: " .. requestedLens)
       
-      -- Здесь должна быть логика переноса линзы
-      self.logger:info("Установка линзы (симуляция).")
-      self.currentLens = requestedLens
+      if self.transposer then
+        local chest, mach = findT6Sides(self.transposer, requestedLens)
+        if chest and mach then
+          -- 1. Извлекаем старую линзу, если она есть
+          local machSlot, machStack = findItemInInventory(self.transposer, mach, "Lens")
+          if machSlot then
+            self.logger:info("Извлечение старой линзы из машины: " .. machStack.label)
+            pcall(self.transposer.transferItem, mach, chest, 1, machSlot)
+          end
 
-      if requestedLens == "Dilithium Lens" then
-        self.logger:info("Установлена Dilithium Lens. Переход в waitEnd.")
-        self.state = "waitEnd"
-        stateMod.t6.status = "WAITING"
-        stateMod.t6.color = theme.C.partial
+          -- 2. Вставляем новую линзу
+          local chestSlot, chestStack = findItemInInventory(self.transposer, chest, requestedLens)
+          if chestSlot then
+            self.logger:info("Установка линзы: " .. chestStack.label)
+            local ok, transferred = pcall(self.transposer.transferItem, chest, mach, 1, chestSlot)
+            if ok and transferred and transferred > 0 then
+              self.currentLens = requestedLens
+            end
+          else
+            self.logger:warning("Линза " .. requestedLens .. " не найдена в сундуке!")
+          end
+        else
+          self.logger:warning("Не удалось определить стороны сундука/машины для линзы!")
+        end
       else
-        self.logger:info("Переход в waitLens.")
-        self.state = "waitLens"
-        stateMod.t6.status = "WAIT LENS"
-        stateMod.t6.color = theme.C.partial
+        self.logger:warning("Транспозер для T6 не подключен!")
+      end
+
+      if self.currentLens == requestedLens then
+        -- Успешно заменили линзу
+        -- Если это Dilithium Lens, то это финальный шаг рецепта (waitEnd)
+        local cleanRequested = requestedLens:gsub("§.", ""):lower()
+        if cleanRequested:find("dilithium") then
+          self.logger:info("Установлена Dilithium Lens. Переход в waitEnd.")
+          self.state = "waitEnd"
+          stateMod.t6.status = "WAITING"
+          stateMod.t6.color = theme.C.partial
+        else
+          self.logger:info("Переход в waitLens.")
+          self.state = "waitLens"
+          stateMod.t6.status = "WAIT LENS"
+          stateMod.t6.color = theme.C.partial
+        end
       end
     elseif self.state == "waitLens" then
       if not hasWork then

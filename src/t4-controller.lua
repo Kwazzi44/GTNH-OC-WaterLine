@@ -47,6 +47,101 @@ function t4controller:new(config, logger)
       return false
     end
 
+  local function transferFluidOrItem(transposer, fluidNamePart, itemNamePart, amount)
+    if not transposer then return false, "no transposer" end
+    
+    local sourceSide, sinkSide = nil, nil
+    for side = 0, 5 do
+      local success, tanks = pcall(transposer.getFluidInTank, side)
+      if success and tanks and #tanks > 0 then
+        local fluid = tanks[1]
+        if fluid and fluid.amount > 0 and fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
+          sourceSide = side
+        else
+          sinkSide = side
+        end
+      end
+    end
+    
+    if sourceSide then
+      if not sinkSide then
+        for side = 0, 5 do
+          if side ~= sourceSide then
+            local success, tanks = pcall(transposer.getFluidInTank, side)
+            if success and tanks then
+              sinkSide = side
+              break
+            end
+          end
+        end
+      end
+      if sinkSide then
+        local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
+        if ok and transferred and transferred > 0 then
+          return true, "fluid", transferred
+        end
+      end
+    end
+    
+    local itemSourceSide, itemSinkSide = nil, nil
+    local sourceSlot = nil
+    for side = 0, 5 do
+      local success, size = pcall(transposer.getInventorySize, side)
+      if success and size and size > 0 then
+        local succ2, stacks = pcall(transposer.getAllStacks, side)
+        if succ2 and stacks then
+          local slot = 1
+          for stack in stacks do
+            if stack and stack.size > 0 and stack.name and (stack.name:lower():find(itemNamePart:lower()) or (stack.label and stack.label:lower():find(itemNamePart:lower()))) then
+              itemSourceSide = side
+              sourceSlot = slot
+              break
+            end
+            slot = slot + 1
+          end
+        end
+      end
+    end
+    
+    if itemSourceSide then
+      for side = 0, 5 do
+        if side ~= itemSourceSide then
+          local success, size = pcall(transposer.getInventorySize, side)
+          if success and size and size > 0 then
+            itemSinkSide = side
+            break
+          end
+        end
+      end
+      
+      if itemSinkSide and sourceSlot then
+        local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
+        if ok and transferred and transferred > 0 then
+          return true, "item", transferred
+        end
+      end
+    end
+    
+    return false, "not found"
+  end
+
+  function obj:init()
+    self.logger:info("Инициализация T4 Controller...")
+    
+    -- Ищем компонент типа gt_machine и сверяем имя через getName()
+    for address, name in component.list("gt_machine") do
+      local proxy = component.proxy(address)
+      if proxy and proxy.getName() == self.config.machineName then
+        self.proxy = proxy
+        break
+      end
+    end
+
+    if not self.proxy then
+      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
+      return false
+    end
+
     if self.config.hydrochloricAcidTransposerAddress and self.config.hydrochloricAcidTransposerAddress ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
       local success, proxy = pcall(component.proxy, self.config.hydrochloricAcidTransposerAddress)
       if success then self.hydrochloricAcidTransposer = proxy end
@@ -105,22 +200,29 @@ function t4controller:new(config, logger)
 
       if diffPh > 0 then
         self.logger:info("pH низкий (" .. ph .. "). Требуется Sodium Hydroxide: " .. count)
-        -- Исправленный баг с кратностью 64
-        local remaining = count
-        while remaining > 0 do
-          local toTransfer = math.min(remaining, 64)
-          self.logger:info("Добавление Sodium Hydroxide: " .. toTransfer .. " шт (симуляция).")
-          remaining = remaining - toTransfer
+        if self.sodiumHydroxideTransposer then
+          local ok, type, transferred = transferFluidOrItem(self.sodiumHydroxideTransposer, "sodium", "sodium", math.min(count, 64))
+          if ok then
+            self.logger:info(string.format("Добавлено Sodium Hydroxide (%s): %s шт/mB", type, tostring(transferred)))
+          else
+            self.logger:warning("Не удалось добавить Sodium Hydroxide (проверьте наличие в буфере)")
+          end
+        else
+          self.logger:warning("Транспозер Sodium Hydroxide не подключен!")
         end
       else
         self.logger:info("pH высокий (" .. ph .. "). Требуется Hydrochloric Acid: " .. count)
-        self.logger:info("Добавление Hydrochloric Acid (симуляция).")
+        if self.hydrochloricAcidTransposer then
+          local ok, type, transferred = transferFluidOrItem(self.hydrochloricAcidTransposer, "hydrochloric", "hydrochloric", math.min(count, 64))
+          if ok then
+            self.logger:info(string.format("Добавлено Hydrochloric Acid (%s): %s шт/mB", type, tostring(transferred)))
+          else
+            self.logger:warning("Не удалось добавить Hydrochloric Acid (проверьте наличие в буфере)")
+          end
+        else
+          self.logger:warning("Транспозер Hydrochloric Acid не подключен!")
+        end
       end
-
-      self.logger:info("Переход в waitEnd.")
-      self.state = "waitEnd"
-      stateMod.t4.status = "WAITING"
-      stateMod.t4.color = theme.C.partial
     elseif self.state == "waitEnd" then
       self.logger:info("Ожидание события cycle_end...")
       local ev, arg = event.pull(10, "cycle_end")
