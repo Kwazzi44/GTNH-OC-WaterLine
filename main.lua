@@ -113,6 +113,7 @@ local state = require("lib.state")
 
 gui.init()
 gui.drawLayout()
+config.logger.printToScreen = false
 
 -- Ожидание выхода и обновление экрана
 while true do
