@@ -65,7 +65,17 @@ function logViewer.show(config)
   local endY = H - 3
   local height = endY - startY + 1
   
-  local function drawScreen()
+    local function drawScreen()
+    local hasBuf = false
+    local buf = nil
+    if gpu.allocateBuffer then
+      buf = gpu.allocateBuffer(W, H)
+      if buf then
+        gpu.setActiveBuffer(buf)
+        hasBuf = true
+      end
+    end
+
     theme.gfill(1, 1, W, H, " ", theme.C.text, theme.C.bg)
     theme.drawHeader("WATER LINE LOG VIEWER", "LOG ANALYSIS PANEL")
     theme.drawFooter({
@@ -148,13 +158,18 @@ function logViewer.show(config)
       local indicatorText = string.format(" %d%% ", 100 - scrollPercent)
       theme.gset(W - 10, startY - 1, indicatorText, theme.C.title, theme.C.bg)
     end
+
+    if hasBuf then
+      gpu.bitblt(0, 1, 1, W, H, buf, 1, 1)
+      gpu.freeAllBuffers()
+    end
   end
   
   drawScreen()
   
   -- Event loop for log viewer
   while true do
-    local ev, _, _, keyCode = event.pull(2, "key_up")
+    local ev, _, _, keyCode = event.pull(2)
     
     if ev == "key_up" then
       if keyCode == keyboard.keys.q or keyCode == keyboard.keys.b or keyCode == keyboard.keys.escape then

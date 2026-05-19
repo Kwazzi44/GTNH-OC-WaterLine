@@ -23,6 +23,20 @@ local function makeProgressBar(pct, width)
 end
 
 function gui.drawLayout()
+  -- ВКЛЮЧАЕМ БУФЕРИЗАЦИЮ ЭКРАНА (Убирает лаги и зависания)
+  local hasBuffer = false
+  local buf = nil
+  if gpu.allocateBuffer then
+    buf = gpu.allocateBuffer(W, H)
+    if buf then
+      gpu.setActiveBuffer(buf)
+      hasBuffer = true
+    end
+  end
+
+  -- Очистка фона в буфере
+  theme.gfill(1, 1, W, H, " ", theme.C.text, theme.C.bg)
+
   -- WPP Subtitle calculation
   local subtitle = "LINE: DISABLED"
   if state.line and state.line.status and state.line.status ~= "DISABLED" then
@@ -48,6 +62,12 @@ function gui.drawLayout()
   
   gui.drawTierCards()
   gui.drawLogsBox()
+
+  -- ВЫВОДИМ БУФЕР НА ЭКРАН ОДНИМ КАДРОМ
+  if hasBuffer then
+    gpu.bitblt(0, 1, 1, W, H, buf, 1, 1)
+    gpu.freeAllBuffers()
+  end
 end
 
 function gui.drawTierCards()

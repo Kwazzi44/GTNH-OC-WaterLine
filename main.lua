@@ -189,7 +189,9 @@ while not quitFlag do
   end
 
   -- 4. Yield / Poll for keyboard events (non-blocking)
-  local ev, _, _, keyCode = event.pull(0.1, "key_down")
+  -- Убран фильтр "key_down", чтобы пропускать другие системные эвенты мгновенно!
+  local ev, _, _, keyCode = event.pull(0.1)
+  
   if ev == "key_down" then
     if keyCode == keyboard.keys.q then
       quitFlag = true
@@ -199,6 +201,7 @@ while not quitFlag do
       event.ignore("log_warning", onLogWarning)
       event.ignore("log_error", onLogError)
       if component.gpu then
+        component.gpu.freeAllBuffers()
         component.gpu.setBackground(0x000000)
         component.gpu.setForeground(0xFFFFFF)
         require("term").clear()
