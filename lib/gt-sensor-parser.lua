@@ -17,8 +17,19 @@ function gtSensorParser:new(gtMachineProxy)
   obj.gtMachineProxy = gtMachineProxy
   obj.sensorData = {}
 
+  local lastQueryTime = 0
+  local cacheDuration = 1.0 -- Кэшируем информацию сенсора на 1 секунду
+
   function obj:getInformation()
-    self.sensorData = self.gtMachineProxy.getSensorInformation()
+    local computer = require("computer")
+    local now = computer.uptime()
+    if now - lastQueryTime >= cacheDuration or #self.sensorData == 0 then
+      local ok, res = pcall(self.gtMachineProxy.getSensorInformation)
+      if ok and res then
+        self.sensorData = res
+        lastQueryTime = now
+      end
+    end
   end
 
   function obj:getNumber(line, prefix, postfix)

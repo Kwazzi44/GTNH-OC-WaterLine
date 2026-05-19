@@ -225,7 +225,9 @@ function t7controller:new(
   end
 
   function obj:loop()
-    self.gtSensorParser:getInformation()
+    if self.controllerProxy.hasWork() then
+      self.gtSensorParser:getInformation()
+    end
     self.stateMachine:update()
   end
 
