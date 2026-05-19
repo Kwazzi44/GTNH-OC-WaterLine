@@ -1655,6 +1655,48 @@ function componentDiscover.discoverProxy(address, name, type)
   return component.proxy(fullAddress, type)
 end
 
+local function wrapGtMachine(proxy)
+  local cache = {}
+  local lastCall = {}
+  local cachedMethods = {
+    hasWork = true,
+    isWorkAllowed = true,
+    getWorkProgress = true,
+    getWorkMaxProgress = true,
+    getSensorInformation = true
+  }
+
+  local wrapper = {}
+  setmetatable(wrapper, {
+    __index = function(_, key)
+      local orig = proxy[key]
+      if type(orig) ~= "function" then
+        return orig
+      end
+
+      if cachedMethods[key] then
+        return function(self, ...)
+          local computer = require("computer")
+          local now = computer.uptime()
+          if not lastCall[key] or (now - lastCall[key] >= 1.0) then
+            local ok, res = pcall(orig, proxy, ...)
+            if ok then
+              cache[key] = res
+              lastCall[key] = now
+            end
+          end
+          return cache[key]
+        end
+      else
+        return function(self, ...)
+          return orig(proxy, ...)
+        end
+      end
+    end
+  })
+  return wrapper
+end
+
 ---Discover gt_machine by name
 ---@param machineName string
 ---@return gt_machine|nil
@@ -1667,7 +1709,7 @@ function componentDiscover.discoverGtMachine(machineName)
         if machineProxy then
           local ok, name = pcall(machineProxy.getName)
           if ok and name then
-            machineCache[name] = machineProxy
+            machineCache[name] = wrapGtMachine(machineProxy)
           end
         end
       end
@@ -1710,6 +1752,11 @@ function componentDiscover.discoverTransposerItemStorage(proxy, itemLabels, igno
   local itemStorageDescriptor = {}
   local sidesForCheck = getSidesForCheck(ignoreSides)
 
+  local remainingLabels = {}
+  for _, label in ipairs(itemLabels) do
+    remainingLabels[label] = true
+  end
+
   for _, side in pairs(sidesForCheck) do
     local stacks = proxy.getAllStacks(side)
 
@@ -1717,11 +1764,10 @@ function componentDiscover.discoverTransposerItemStorage(proxy, itemLabels, igno
       local slots = stacks.getAll()
 
       for slotIndex, slot in pairs(slots) do
-
         if next(slot) ~= nil then
-          for itemLabelIndex, itemLabel in pairs(itemLabels) do
+          for itemLabel in pairs(remainingLabels) do
             if slot.label ~= nil and string.match(slot.label, escapePattern(itemLabel)) then
-              table.remove(itemLabels, itemLabelIndex)
+              remainingLabels[itemLabel] = nil
               itemStorageDescriptor[itemLabel] = {side = side, slot = slotIndex + 1}
               break
             end
@@ -1731,7 +1777,12 @@ function componentDiscover.discoverTransposerItemStorage(proxy, itemLabels, igno
     end
   end
 
-  return itemStorageDescriptor, itemLabels
+  local skipped = {}
+  for label in pairs(remainingLabels) do
+    table.insert(skipped, label)
+  end
+
+  return itemStorageDescriptor, skipped
 end
 
 ---Discover fluid storage connected to transposer
@@ -1745,6 +1796,11 @@ function componentDiscover.discoverTransposerFluidStorage(proxy, fluidNames, ign
   local fluidStorageDescriptor = {}
   local sidesForCheck = getSidesForCheck(ignoreSides)
 
+  local remainingFluids = {}
+  for _, name in ipairs(fluidNames) do
+    remainingFluids[name] = true
+  end
+
   for _, side in pairs(sidesForCheck) do
     if proxy.getTankCount(side) ~= 0 then
       local tankCount = proxy.getTankCount(side)
@@ -1752,18 +1808,23 @@ function componentDiscover.discoverTransposerFluidStorage(proxy, fluidNames, ign
       for tankIndex = 1, tankCount, 1 do
         local fluid = proxy.getFluidInTank(side, tankIndex)
 
-        for fluidNameIndex, fluidName in pairs(fluidNames) do
+        for fluidName in pairs(remainingFluids) do
           if fluid.name ~= nil and string.match(fluid.name, escapePattern(fluidName)) then
-            table.remove(fluidNames, fluidNameIndex)
+            remainingFluids[fluidName] = nil
             fluidStorageDescriptor[fluidName] = {side = side, tank = tankIndex}
             break
           end
         end
       end
-     end
+    end
   end
 
-  return fluidStorageDescriptor, fluidNames
+  local skipped = {}
+  for name in pairs(remainingFluids) do
+    table.insert(skipped, name)
+  end
+
+  return fluidStorageDescriptor, skipped
 end
 
 return componentDiscover
