@@ -56,6 +56,12 @@ function t8controller:new(config, logger)
     end
 
     self.logger:info("Инициализация завершена. Начальное состояние: idle.")
+    
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+    stateMod.t8.status = "IDLE"
+    stateMod.t8.color = theme.C.text
+    
     return true
   end
 
@@ -68,55 +74,80 @@ function t8controller:new(config, logger)
     local isYes = checkSensorYes()
     self.logger:debug(string.format("Статус: %s, Работа: %s, Yes: %s", self.state, tostring(hasWork), tostring(isYes)))
 
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+
     if self.state == "idle" then
       if hasWork then
         if isYes then
           self.logger:info("Сенсор говорит 'Yes'. Пропуск шагов. Переход в waitEnd.")
           self.state = "waitEnd"
+          stateMod.t8.status = "WAITING"
+          stateMod.t8.color = theme.C.partial
         else
           self.logger:info("Сенсор говорит 'No'. Переход в putFirst.")
           self.state = "putFirst"
+          stateMod.t8.status = "STEP 1"
+          stateMod.t8.color = theme.C.warn
         end
       end
     elseif self.state == "putFirst" then
       self.logger:info("Шаг 1: Выкладываем кварки (симуляция).")
       self.lastPut = 1
       self.state = "resultPutFirst"
+      stateMod.t8.status = "CHECK 1"
+      stateMod.t8.color = theme.C.warn
     elseif self.state == "resultPutFirst" then
       if isYes then
         self.logger:info("После шага 1 получили 'Yes'. Переход в waitEnd.")
         self.state = "waitEnd"
+        stateMod.t8.status = "WAITING"
+        stateMod.t8.color = theme.C.partial
       else
         self.logger:info("После шага 1 получили 'No'. Переход в putSecond.")
         self.state = "putSecond"
+        stateMod.t8.status = "STEP 2"
+        stateMod.t8.color = theme.C.warn
       end
     elseif self.state == "putSecond" then
       self.logger:info("Шаг 2: Выкладываем кварки (симуляция).")
       self.lastPut = 2
       self.state = "resultPutSecond"
+      stateMod.t8.status = "CHECK 2"
+      stateMod.t8.color = theme.C.warn
     elseif self.state == "resultPutSecond" then
       if isYes then
         self.logger:info("После шага 2 получили 'Yes'. Переход в waitEnd.")
         self.state = "waitEnd"
+        stateMod.t8.status = "WAITING"
+        stateMod.t8.color = theme.C.partial
       else
         self.logger:info("После шага 2 получили 'No'. Переход в putThird.")
         self.state = "putThird"
+        stateMod.t8.status = "STEP 3"
+        stateMod.t8.color = theme.C.warn
       end
     elseif self.state == "putThird" then
       self.logger:info("Шаг 3: Выкладываем кварки (симуляция).")
       self.lastPut = 3
       self.state = "waitEnd"
+      stateMod.t8.status = "WAITING"
+      stateMod.t8.color = theme.C.partial
     elseif self.state == "waitEnd" then
       self.logger:info("Ожидание события cycle_end...")
       local ev, arg = event.pull(10, "cycle_end")
       if ev then
         self.logger:info("Получено событие cycle_end. Переход в craftQuarks.")
         self.state = "craftQuarks"
+        stateMod.t8.status = "CRAFTING"
+        stateMod.t8.color = theme.C.warn
       else
         self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
         if not hasWork then
           self.logger:info("Машина не работает. Возврат в idle.")
           self.state = "idle"
+          stateMod.t8.status = "IDLE"
+          stateMod.t8.color = theme.C.text
         end
       end
     elseif self.state == "craftQuarks" then
@@ -125,6 +156,8 @@ function t8controller:new(config, logger)
       os.sleep(3) -- Симуляция времени крафта
       self.logger:info("Крафт заказан. Возврат в idle.")
       self.state = "idle"
+      stateMod.t8.status = "IDLE"
+      stateMod.t8.color = theme.C.text
     end
   end
 

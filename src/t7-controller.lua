@@ -75,6 +75,12 @@ function t7controller:new(config, logger)
     self.coolantTransposer = getProxy(self.config.coolantTransposerAddress, "Coolant")
 
     self.logger:info("Инициализация завершена. Начальное состояние: idle.")
+    
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+    stateMod.t7.status = "IDLE"
+    stateMod.t7.color = theme.C.text
+    
     return true
   end
 
@@ -87,10 +93,15 @@ function t7controller:new(config, logger)
     local bitString = getBitString()
     self.logger:debug(string.format("Статус: %s, Работа: %s, Биты: %s", self.state, tostring(hasWork), tostring(bitString)))
 
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+
     if self.state == "idle" then
       if hasWork then
         self.logger:info("Обнаружена работа. Переход в work.")
         self.state = "work"
+        stateMod.t7.status = "WORKING"
+        stateMod.t7.color = theme.C.warn
       end
     elseif self.state == "work" then
       if not bitString then
@@ -104,12 +115,16 @@ function t7controller:new(config, logger)
       if bits[1] == false and bits[2] == false and bits[3] == false and bits[4] == false then
         self.logger:info("Все биты 0. Заливка Coolant (симуляция).")
         self.state = "waitEnd"
+        stateMod.t7.status = "WAITING"
+        stateMod.t7.color = theme.C.partial
         return
       end
 
       if bits[4] == true then
         self.logger:info("Бит 4 активен. Пропуск. Переход в waitEnd.")
         self.state = "waitEnd"
+        stateMod.t7.status = "WAITING"
+        stateMod.t7.color = theme.C.partial
         return
       end
 
@@ -125,17 +140,23 @@ function t7controller:new(config, logger)
 
       self.logger:info("Переход в waitEnd.")
       self.state = "waitEnd"
+      stateMod.t7.status = "WAITING"
+      stateMod.t7.color = theme.C.partial
     elseif self.state == "waitEnd" then
       self.logger:info("Ожидание события cycle_end...")
       local ev, arg = event.pull(10, "cycle_end")
       if ev then
         self.logger:info("Получено событие cycle_end. Возврат в idle.")
         self.state = "idle"
+        stateMod.t7.status = "IDLE"
+        stateMod.t7.color = theme.C.text
       else
         self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
         if not hasWork then
           self.logger:info("Машина не работает. Возврат в idle.")
           self.state = "idle"
+          stateMod.t7.status = "IDLE"
+          stateMod.t7.color = theme.C.text
         end
       end
     end

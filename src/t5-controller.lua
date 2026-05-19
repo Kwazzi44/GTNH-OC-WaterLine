@@ -60,6 +60,12 @@ function t5controller:new(config, logger)
     end
 
     self.logger:info("Инициализация завершена. Начальное состояние: idle.")
+    
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+    stateMod.t5.status = "IDLE"
+    stateMod.t5.color = theme.C.text
+    
     return true
   end
 
@@ -72,16 +78,23 @@ function t5controller:new(config, logger)
     local temp = getTemperature()
     self.logger:debug(string.format("Статус: %s, Работа: %s, Темп: %s", self.state, tostring(hasWork), tostring(temp)))
 
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+
     if self.state == "idle" then
       if hasWork then
         self.logger:info("Обнаружена работа. Переход в heating.")
         self.iterations = 0
         self.state = "heating"
+        stateMod.t5.status = "HEATING"
+        stateMod.t5.color = theme.C.warn
       end
     elseif self.state == "heating" then
       if self.iterations >= 2 then
         self.logger:info("Достигнут лимит итераций (2). Переход в waitEnd.")
         self.state = "waitEnd"
+        stateMod.t5.status = "WAITING"
+        stateMod.t5.color = theme.C.partial
         return
       end
 
@@ -93,6 +106,8 @@ function t5controller:new(config, logger)
       if temp and temp >= 10000 then
         self.logger:info("Температура достигла 10000. Переход в cooling.")
         self.state = "cooling"
+        stateMod.t5.status = "COOLING"
+        stateMod.t5.color = theme.C.partial
       end
     elseif self.state == "cooling" then
       -- Здесь должна быть логика заливки хладагента
@@ -103,6 +118,8 @@ function t5controller:new(config, logger)
         self.logger:info("Температура упала до 0. Возврат в heating, итерация +1.")
         self.iterations = self.iterations + 1
         self.state = "heating"
+        stateMod.t5.status = "HEATING"
+        stateMod.t5.color = theme.C.warn
       end
     elseif self.state == "waitEnd" then
       self.logger:info("Ожидание события cycle_end...")
@@ -111,11 +128,15 @@ function t5controller:new(config, logger)
       if ev then
         self.logger:info("Получено событие cycle_end. Возврат в idle.")
         self.state = "idle"
+        stateMod.t5.status = "IDLE"
+        stateMod.t5.color = theme.C.text
       else
         self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
         if not hasWork then
           self.logger:info("Машина не работает. Возврат в idle.")
           self.state = "idle"
+          stateMod.t5.status = "IDLE"
+          stateMod.t5.color = theme.C.text
         end
       end
     end

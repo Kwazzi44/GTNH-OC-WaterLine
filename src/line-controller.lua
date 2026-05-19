@@ -13,6 +13,17 @@ function lineController:new(config, logger)
   function obj:init()
     self.logger:info("Инициализация Line Controller...")
     
+    if self.config.machineAddress and self.config.machineAddress ~= "" then
+      local proxy = component.proxy(self.config.machineAddress)
+      if proxy then
+        self.proxy = proxy
+        self.logger:info("Машина найдена по адресу из реестра: " .. self.config.machineAddress)
+        return true
+      else
+        self.logger:warning("Машина с адресом " .. self.config.machineAddress .. " из реестра не найдена. Пытаемся найти по имени.")
+      end
+    end
+
     -- Ищем компонент типа gt_machine и сверяем имя через getName()
     for address, name in component.list("gt_machine") do
       local proxy = component.proxy(address)

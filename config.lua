@@ -65,4 +65,39 @@ local config = {
   }
 }
 
+-- Попробуем загрузить реестр и объединить его с конфигурацией
+local filesystem = pcall(require, "filesystem") and require("filesystem")
+if filesystem then
+  local registryPath = "/home/registry.lua"
+  if filesystem.exists(registryPath) then
+    local ok, reg = pcall(loadfile(registryPath))
+    if ok and type(reg) == "table" then
+      -- Объединяем lineController
+      if reg.lineController then
+        if reg.lineController.machineAddress then
+          config.lineController.machineAddress = reg.lineController.machineAddress
+        end
+      end
+      -- Объединяем controllers
+      if reg.controllers then
+        for tier, regData in pairs(reg.controllers) do
+          if config.controllers[tier] then
+            local c = config.controllers[tier]
+            local hasAnyAddress = false
+            for k, v in pairs(regData) do
+              if v and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+                c[k] = v
+                hasAnyAddress = true
+              end
+            end
+            if hasAnyAddress then
+              c.enable = true
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
 return config

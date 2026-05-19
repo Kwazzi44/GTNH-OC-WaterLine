@@ -58,6 +58,12 @@ function t4controller:new(config, logger)
     end
 
     self.logger:info("Инициализация завершена. Начальное состояние: idle.")
+    
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+    stateMod.t4.status = "IDLE"
+    stateMod.t4.color = theme.C.text
+    
     return true
   end
 
@@ -70,10 +76,15 @@ function t4controller:new(config, logger)
     local ph = getPhValue()
     self.logger:debug(string.format("Статус: %s, Работа: %s, pH: %s", self.state, tostring(hasWork), tostring(ph)))
 
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+
     if self.state == "idle" then
       if hasWork then
         self.logger:info("Обнаружена работа. Переход в work.")
         self.state = "work"
+        stateMod.t4.status = "WORKING"
+        stateMod.t4.color = theme.C.warn
       end
     elseif self.state == "work" then
       if not ph then
@@ -87,6 +98,8 @@ function t4controller:new(config, logger)
       if count == 0 then
         self.logger:info("pH в норме (7). Переход в waitEnd.")
         self.state = "waitEnd"
+        stateMod.t4.status = "WAITING"
+        stateMod.t4.color = theme.C.partial
         return
       end
 
@@ -106,17 +119,23 @@ function t4controller:new(config, logger)
 
       self.logger:info("Переход в waitEnd.")
       self.state = "waitEnd"
+      stateMod.t4.status = "WAITING"
+      stateMod.t4.color = theme.C.partial
     elseif self.state == "waitEnd" then
       self.logger:info("Ожидание события cycle_end...")
       local ev, arg = event.pull(10, "cycle_end")
       if ev then
         self.logger:info("Получено событие cycle_end. Возврат в idle.")
         self.state = "idle"
+        stateMod.t4.status = "IDLE"
+        stateMod.t4.color = theme.C.text
       else
         self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
         if not hasWork then
           self.logger:info("Машина не работает. Возврат в idle.")
           self.state = "idle"
+          stateMod.t4.status = "IDLE"
+          stateMod.t4.color = theme.C.text
         end
       end
     end

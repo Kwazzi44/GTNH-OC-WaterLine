@@ -50,6 +50,12 @@ function t6controller:new(config, logger)
     end
 
     self.logger:info("Инициализация завершена. Начальное состояние: idle.")
+    
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+    stateMod.t6.status = "IDLE"
+    stateMod.t6.color = theme.C.text
+    
     return true
   end
 
@@ -62,10 +68,15 @@ function t6controller:new(config, logger)
     local requestedLens = getRequestedLens()
     self.logger:debug(string.format("Статус: %s, Работа: %s, Линза: %s", self.state, tostring(hasWork), tostring(requestedLens)))
 
+    local stateMod = require("lib.state")
+    local theme = require("lib.theme")
+
     if self.state == "idle" then
       if hasWork then
         self.logger:info("Обнаружена работа. Переход в changeLens.")
         self.state = "changeLens"
+        stateMod.t6.status = "LENS CHG"
+        stateMod.t6.color = theme.C.warn
       end
     elseif self.state == "changeLens" then
       if not requestedLens then
@@ -82,20 +93,28 @@ function t6controller:new(config, logger)
       if requestedLens == "Dilithium Lens" then
         self.logger:info("Установлена Dilithium Lens. Переход в waitEnd.")
         self.state = "waitEnd"
+        stateMod.t6.status = "WAITING"
+        stateMod.t6.color = theme.C.partial
       else
         self.logger:info("Переход в waitLens.")
         self.state = "waitLens"
+        stateMod.t6.status = "WAIT LENS"
+        stateMod.t6.color = theme.C.partial
       end
     elseif self.state == "waitLens" then
       if not hasWork then
         self.logger:info("Работа завершена. Возврат в idle.")
         self.state = "idle"
+        stateMod.t6.status = "IDLE"
+        stateMod.t6.color = theme.C.text
         return
       end
 
       if requestedLens ~= self.currentLens then
         self.logger:info("Требуемая линза изменилась. Переход в changeLens.")
         self.state = "changeLens"
+        stateMod.t6.status = "LENS CHG"
+        stateMod.t6.color = theme.C.warn
       end
     elseif self.state == "waitEnd" then
       self.logger:info("Ожидание события cycle_end...")
@@ -103,11 +122,15 @@ function t6controller:new(config, logger)
       if ev then
         self.logger:info("Получено событие cycle_end. Возврат в idle.")
         self.state = "idle"
+        stateMod.t6.status = "IDLE"
+        stateMod.t6.color = theme.C.text
       else
         self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
         if not hasWork then
           self.logger:info("Машина не работает. Возврат в idle.")
           self.state = "idle"
+          stateMod.t6.status = "IDLE"
+          stateMod.t6.color = theme.C.text
         end
       end
     end
