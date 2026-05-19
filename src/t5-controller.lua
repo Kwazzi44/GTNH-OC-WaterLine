@@ -78,7 +78,7 @@ function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
         self.stateMachine:setState(self.stateMachine.states.idle)
       end
 
-      if temperature >= 10000 then
+      if temperature and temperature >= 10000 then
         self.stateMachine:setState(self.stateMachine.states.cooling)
       end
     end
@@ -103,7 +103,7 @@ function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
         self.stateMachine:setState(self.stateMachine.states.idle)
       end
 
-      if temperature <= 0 then
+      if temperature and temperature <= 0 then
         self.stateMachine:setState(self.stateMachine.states.heating)
         self.stateMachine.data.iterations = self.stateMachine.data.iterations + 1
       end

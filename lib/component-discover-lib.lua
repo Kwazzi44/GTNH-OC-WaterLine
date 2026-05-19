@@ -83,22 +83,25 @@ local function wrapGtMachine(proxy)
         return orig
       end
 
-      if cachedMethods[key] then
-        return function(self, ...)
+      return function(...)
+        local args = {...}
+        if args[1] == wrapper then
+          table.remove(args, 1)
+        end
+
+        if cachedMethods[key] then
           local computer = require("computer")
           local now = computer.uptime()
           if not lastCall[key] or (now - lastCall[key] >= 1.0) then
-            local ok, res = pcall(orig, proxy, ...)
+            local ok, res = pcall(orig, table.unpack(args))
             if ok then
               cache[key] = res
               lastCall[key] = now
             end
           end
           return cache[key]
-        end
-      else
-        return function(self, ...)
-          return orig(proxy, ...)
+        else
+          return orig(table.unpack(args))
         end
       end
     end
