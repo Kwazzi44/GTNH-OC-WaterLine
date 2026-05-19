@@ -189,8 +189,8 @@ while not quitFlag do
   end
 
   -- 4. Yield / Poll for keyboard events (non-blocking)
-  local ev, _, _, keyCode = event.pull(0.1, "key_up")
-  if ev == "key_up" then
+  local ev, _, _, keyCode = event.pull(0.1, "key_down")
+  if ev == "key_down" then
     if keyCode == keyboard.keys.q then
       quitFlag = true
     elseif keyCode == keyboard.keys.f1 then

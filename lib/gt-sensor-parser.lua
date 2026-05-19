@@ -24,7 +24,7 @@ function gtSensorParser:new(gtMachineProxy)
     local computer = require("computer")
     local now = computer.uptime()
     if now - lastQueryTime >= cacheDuration or #self.sensorData == 0 then
-      local ok, res = pcall(self.gtMachineProxy.getSensorInformation)
+      local ok, res = pcall(function() return self.gtMachineProxy.getSensorInformation() end)
       if ok and res then
         self.sensorData = res
         lastQueryTime = now
