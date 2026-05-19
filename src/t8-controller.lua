@@ -1,298 +1,224 @@
-local component = require("component")
-local event = require("event")
 local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
 
 local t8controller = {}
 
-function t8controller:new(config, logger)
+function t8controller:newFormConfig(config)
+  return self:new(config.maxQuarkCount, config.transposerAddress, config.subMeInterfaceAddress)
+end
+
+function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddress)
   local obj = {}
-  obj.config = config
-  obj.logger = logger
-  obj.proxy = nil
-  obj.transposer = nil
-  obj.meInterface = nil
-  
-  obj.state = "idle"
-  obj.lastPut = 0
 
-  local function checkSensorYes()
-    if not obj.proxy then return false end
-    local success, info = pcall(obj.proxy.getSensorInformation)
-    if not success or not info then return false end
-    
-    -- Проверяем последнюю строку на наличие "Yes"
-    local lastLine = info[#info]
-    if lastLine and lastLine:find("Yes") then
-      return true
-    end
-    return false
-  end
+  obj.maxQuarkCount = maxQuarkCount
 
-  local function findItemInInventory(transposer, side, namePart)
-    local success, size = pcall(transposer.getInventorySize, side)
-    if not success or not size then return nil end
-    for slot = 1, size do
-      local success2, stack = pcall(transposer.getStackInSlot, side, slot)
-      if success2 and stack and stack.size > 0 then
-        local name = stack.name or ""
-        local label = stack.label or ""
-        local cleanName = name:gsub("§.", ""):lower()
-        local cleanLabel = label:gsub("§.", ""):lower()
-        local cleanQuery = namePart:gsub("§.", ""):lower()
-        if cleanName:find(cleanQuery) or cleanLabel:find(cleanQuery) then
-          return slot, stack
-        end
-      end
-    end
-    return nil
-  end
+  obj.transposerProxy = nil
+  obj.subMeInterfaceProxy = nil
+  obj.controllerProxy = nil
 
-  local function findT8Sides(transposer)
-    local chestSide, machineSide = nil, nil
-    local maxSlots = -1
-    local minSlots = 99999
-    for side = 0, 5 do
-      local success, size = pcall(transposer.getInventorySize, side)
-      if success and size and size > 0 then
-        if size > maxSlots then
-          maxSlots = size
-          chestSide = side
-        end
-        if size < minSlots then
-          minSlots = size
-          machineSide = side
-        end
-      end
-    end
-    if chestSide == machineSide then
-      return 0, 1
-    end
-    return chestSide, machineSide
-  end
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerItems = {}
 
   function obj:init()
-    self.logger:info("Инициализация T8 Controller...")
-    
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
+    self:findMachineProxy()
+    self:findTransposerItem(self.transposerProxy, {
+      "Up-Quark Releasing Catalyst",
+      "Down-Quark Releasing Catalyst",
+      "Strange-Quark Releasing Catalyst",
+      "Charm-Quark Releasing Catalyst",
+      "Bottom-Quark Releasing Catalyst",
+      "Top-Quark Releasing Catalyst"
+    })
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.hasWork() then
+        if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+          self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        else
+          self.stateMachine:setState(self.stateMachine.states.putFirst)
+        end
       end
     end
 
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
+    self.stateMachine.states.putFirst = self.stateMachine:createState("Put First")
+    self.stateMachine.states.putFirst.init = function()
+      self:putQuarks(1)
+      self.stateMachine:setState(self.stateMachine.states.resultPutFirst)
     end
 
-    if self.config.transposerAddress and self.config.transposerAddress ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-      local success, proxy = pcall(component.proxy, self.config.transposerAddress)
-      if success then self.transposer = proxy end
+    self.stateMachine.states.resultPutFirst = self.stateMachine:createState("Result Put First")
+    self.stateMachine.states.resultPutFirst.update = function()
+      if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      else
+        self.stateMachine:setState(self.stateMachine.states.putSecond)
+      end
     end
 
-    if self.config.subMeInterfaceAddress and self.config.subMeInterfaceAddress ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-      local success, proxy = pcall(component.proxy, self.config.subMeInterfaceAddress)
-      if success then self.meInterface = proxy end
+    self.stateMachine.states.putSecond = self.stateMachine:createState("Put Second")
+    self.stateMachine.states.putSecond.init = function()
+      self:putQuarks(2)
+      self.stateMachine:setState(self.stateMachine.states.resultPutSecond)
     end
 
-    self.logger:info("Инициализация завершена. Начальное состояние: idle.")
-    
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-    stateMod.t8.status = "IDLE"
-    stateMod.t8.color = theme.C.text
-    
-    return true
+    self.stateMachine.states.resultPutSecond = self.stateMachine:createState("Result Put Second")
+    self.stateMachine.states.resultPutSecond.update = function()
+      if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      else
+        self.stateMachine:setState(self.stateMachine.states.putThird)
+      end
+    end
+
+    self.stateMachine.states.putThird = self.stateMachine:createState("Put Third")
+    self.stateMachine.states.putThird.init = function()
+      self:putQuarks(3)
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    self.stateMachine.states.craftQuarks = self.stateMachine:createState("Craft Quarks")
+    self.stateMachine.states.craftQuarks.init = function()
+      os.sleep(3)
+
+      local quarks = self.subMeInterfaceProxy.getItemsInNetwork({name = "gregtech:gt.metaitem.03"})
+
+      for _, quark in pairs(quarks) do
+        if quark.label ~= "Unaligned Quark Releasing Catalyst" and quark.size < self.maxQuarkCount then
+          local crafts = self.subMeInterfaceProxy.getCraftables({label = quark.label})
+
+          if crafts[1] == nil then
+            event.push("log_warning", "[T8] No craft for: "..quark.label)
+            self.controllerProxy.setWorkAllowed(false)
+            break
+          end
+
+          crafts[1].request(self.maxQuarkCount - quark.size)
+        end
+      end
+
+      self.stateMachine:setState(self.stateMachine.states.idle)
+    end
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.craftQuarks)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitextractor")
+
+    if self.controllerProxy == nil then
+      error("[T8] Absolute Baryonic Perfection Purification Unit not found")
+    end
+
+    self.transposerProxy = componentDiscoverLib.discoverProxy(
+      transposerAddress,
+      "[T8] Transposer",
+      "transposer")
+    self.subMeInterfaceProxy = componentDiscoverLib.discoverProxy(
+      subMeInterfaceAddress,
+      "[T8] Sub Me Interface",
+      "me_interface")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerItem(proxy, itemLabels)
+    local result, skipped = componentDiscoverLib.discoverTransposerItemStorage(proxy, itemLabels, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T8] Can't find items: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerItems[key] = value
+    end
+  end
+
+  function obj:putQuarks(index)
+    local drops = {
+      {
+        "Up-Quark Releasing Catalyst",
+        "Down-Quark Releasing Catalyst",
+        "Strange-Quark Releasing Catalyst",
+        "Charm-Quark Releasing Catalyst",
+        "Bottom-Quark Releasing Catalyst",
+        "Top-Quark Releasing Catalyst"
+      },
+      {
+        "Up-Quark Releasing Catalyst",
+        "Strange-Quark Releasing Catalyst",
+        "Bottom-Quark Releasing Catalyst",
+        "Down-Quark Releasing Catalyst",
+        "Top-Quark Releasing Catalyst",
+        "Charm-Quark Releasing Catalyst"
+      },
+      {
+        "Up-Quark Releasing Catalyst",
+        "Bottom-Quark Releasing Catalyst",
+        "Down-Quark Releasing Catalyst",
+        "Charm-Quark Releasing Catalyst",
+        "Strange-Quark Releasing Catalyst",
+        "Top-Quark Releasing Catalyst"
+      }
+    }
+
+    self.stateMachine.data.lastPut = index
+
+    for i = 1, 6, 1 do
+      local transfered = self.transposerProxy.transferItem(
+        self.transposerItems[drops[index][i]].side,
+        sides.up,
+        1,
+        self.transposerItems[drops[index][i]].slot)
+
+      if transfered == 0 then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T8] Not enough quarks on slot: "..drops[index][i])
+      end
+    end
   end
 
   function obj:loop()
-    if not self.proxy then return end
-
-    local success, hasWork = pcall(self.proxy.hasWork)
-    if not success then return end
-
-    local isYes = checkSensorYes()
-    self.logger:debug(string.format("Статус: %s, Работа: %s, Yes: %s", self.state, tostring(hasWork), tostring(isYes)))
-
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-
-    if self.state == "idle" then
-      if hasWork then
-        if isYes then
-          self.logger:info("Сенсор говорит 'Yes'. Пропуск шагов. Переход в waitEnd.")
-          self.state = "waitEnd"
-          stateMod.t8.status = "WAITING"
-          stateMod.t8.color = theme.C.partial
-        else
-          self.logger:info("Сенсор говорит 'No'. Переход в putFirst.")
-          self.state = "putFirst"
-          stateMod.t8.status = "STEP 1"
-          stateMod.t8.color = theme.C.warn
-        end
-      end
-    elseif self.state == "putFirst" then
-      self.logger:info("Шаг 1: Выкладываем кварки.")
-      if self.transposer then
-        local chest, mach = findT8Sides(self.transposer)
-        if chest and mach then
-          local slot, stack = findItemInInventory(self.transposer, chest, "quark")
-          if slot then
-            local toTransfer = math.min(self.config.maxQuarkCount or 4, stack.size)
-            local ok, transferred = pcall(self.transposer.transferItem, chest, mach, toTransfer, slot)
-            if ok and transferred and transferred > 0 then
-              self.logger:info("Выложено кварков на шаге 1: " .. tostring(transferred))
-            else
-              self.logger:warning("Не удалось выложить кварки на шаге 1!")
-            end
-          else
-            self.logger:warning("Кварки не найдены в сундуке!")
-          end
-        else
-          self.logger:warning("Не удалось определить стороны сундука/машины!")
-        end
-      else
-        self.logger:warning("Транспозер T8 не подключен!")
-      end
-      self.lastPut = 1
-      self.state = "resultPutFirst"
-      stateMod.t8.status = "CHECK 1"
-      stateMod.t8.color = theme.C.warn
-    elseif self.state == "resultPutFirst" then
-      if isYes then
-        self.logger:info("После шага 1 получили 'Yes'. Переход в waitEnd.")
-        self.state = "waitEnd"
-        stateMod.t8.status = "WAITING"
-        stateMod.t8.color = theme.C.partial
-      else
-        self.logger:info("После шага 1 получили 'No'. Переход в putSecond.")
-        self.state = "putSecond"
-        stateMod.t8.status = "STEP 2"
-        stateMod.t8.color = theme.C.warn
-      end
-    elseif self.state == "putSecond" then
-      self.logger:info("Шаг 2: Выкладываем кварки.")
-      if self.transposer then
-        local chest, mach = findT8Sides(self.transposer)
-        if chest and mach then
-          local slot, stack = findItemInInventory(self.transposer, chest, "quark")
-          if slot then
-            local toTransfer = math.min(self.config.maxQuarkCount or 4, stack.size)
-            local ok, transferred = pcall(self.transposer.transferItem, chest, mach, toTransfer, slot)
-            if ok and transferred and transferred > 0 then
-              self.logger:info("Выложено кварков на шаге 2: " .. tostring(transferred))
-            else
-              self.logger:warning("Не удалось выложить кварки на шаге 2!")
-            end
-          else
-            self.logger:warning("Кварки не найдены в сундуке!")
-          end
-        else
-          self.logger:warning("Не удалось определить стороны сундука/машины!")
-        end
-      else
-        self.logger:warning("Транспозер T8 не подключен!")
-      end
-      self.lastPut = 2
-      self.state = "resultPutSecond"
-      stateMod.t8.status = "CHECK 2"
-      stateMod.t8.color = theme.C.warn
-    elseif self.state == "resultPutSecond" then
-      if isYes then
-        self.logger:info("После шага 2 получили 'Yes'. Переход в waitEnd.")
-        self.state = "waitEnd"
-        stateMod.t8.status = "WAITING"
-        stateMod.t8.color = theme.C.partial
-      else
-        self.logger:info("После шага 2 получили 'No'. Переход в putThird.")
-        self.state = "putThird"
-        stateMod.t8.status = "STEP 3"
-        stateMod.t8.color = theme.C.warn
-      end
-    elseif self.state == "putThird" then
-      self.logger:info("Шаг 3: Выкладываем кварки.")
-      if self.transposer then
-        local chest, mach = findT8Sides(self.transposer)
-        if chest and mach then
-          local slot, stack = findItemInInventory(self.transposer, chest, "quark")
-          if slot then
-            local toTransfer = math.min(self.config.maxQuarkCount or 4, stack.size)
-            local ok, transferred = pcall(self.transposer.transferItem, chest, mach, toTransfer, slot)
-            if ok and transferred and transferred > 0 then
-              self.logger:info("Выложено кварков на шаге 3: " .. tostring(transferred))
-            else
-              self.logger:warning("Не удалось выложить кварки на шаге 3!")
-            end
-          else
-            self.logger:warning("Кварки не найдены в сундуке!")
-          end
-        else
-          self.logger:warning("Не удалось определить стороны сундука/машины!")
-        end
-      else
-        self.logger:warning("Транспозер T8 не подключен!")
-      end
-      self.lastPut = 3
-      self.state = "waitEnd"
-      stateMod.t8.status = "WAITING"
-      stateMod.t8.color = theme.C.partial
-    elseif self.state == "waitEnd" then
-      self.logger:info("Ожидание события cycle_end...")
-      local ev, arg = event.pull(10, "cycle_end")
-      if ev then
-        self.logger:info("Получено событие cycle_end. Переход в craftQuarks.")
-        self.state = "craftQuarks"
-        stateMod.t8.status = "CRAFTING"
-        stateMod.t8.color = theme.C.warn
-      else
-        self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
-        if not hasWork then
-          self.logger:info("Машина не работает. Возврат в idle.")
-          self.state = "idle"
-          stateMod.t8.status = "IDLE"
-          stateMod.t8.color = theme.C.text
-        end
-      end
-    elseif self.state == "craftQuarks" then
-      self.logger:info("Заказ автокрафта кварков в МЭ...")
-      if self.meInterface then
-        local success, items = pcall(self.meInterface.getItemsInNetwork)
-        if success and items then
-          local targetItem = nil
-          for _, item in ipairs(items) do
-            if item.name and (item.name:lower():find("quark") or (item.label and item.label:lower():find("quark"))) then
-              targetItem = item
-              break
-            end
-          end
-          if targetItem then
-            local ok, err = pcall(self.meInterface.requestCrafting, targetItem, self.config.maxQuarkCount or 4)
-            if ok then
-              self.logger:info("Запрос на крафт кварков успешно отправлен.")
-            else
-              self.logger:warning("Не удалось отправить запрос на автокрафт: " .. tostring(err))
-            end
-          else
-            self.logger:warning("Кварк не найден в МЭ-сети для заказа автокрафта.")
-          end
-        else
-          self.logger:warning("Не удалось получить список предметов в МЭ-сети.")
-        end
-      else
-        self.logger:warning("МЭ-интерфейс T8 не подключен!")
-      end
-      self.state = "idle"
-      stateMod.t8.status = "IDLE"
-      stateMod.t8.color = theme.C.text
-    end
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
   end
 
   function obj:getState()
-    return string.format("State: [%s]", self.state)
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
   end
 
+  setmetatable(obj, self)
+  self.__index = self
   return obj
 end
 

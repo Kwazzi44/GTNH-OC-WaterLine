@@ -1,313 +1,175 @@
-local component = require("component")
-local event = require("event")
 local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
 
 local t5controller = {}
 
-function t5controller:new(config, logger)
+function t5controller:newFormConfig(config)
+  return self:new(config.plasmaTransposerAddress, config.coolantTransposerAddress)
+end
+
+function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
   local obj = {}
-  obj.config = config
-  obj.logger = logger
-  obj.proxy = nil
-  obj.plasmaTransposer = nil
-  obj.coolantTransposer = nil
-  
-  obj.state = "idle"
-  obj.iterations = 0
-  obj.fluidPumped = false
 
-  local function getTemperature()
-    if not obj.proxy then return nil end
-    local success, info = pcall(obj.proxy.getSensorInformation)
-    if not success or not info then return nil end
-    
-    for _, line in ipairs(info) do
-      if line:find("Current temperature:") then
-        -- Извлекаем число. В GT оно может быть с цветом, например "§c10000"
-        local tempStr = line:match("Current temperature:%s*§?%w?(%d+)")
-        if tempStr then
-          return tonumber(tempStr)
-        end
-      end
-    end
-    return nil
-  end
+  obj.plasmaTransposerProxy = nil
+  obj.coolantTransposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerLiquids = {}
+
+  obj.coolantCount = 2000
+  obj.plasmaCount = 100
 
   function obj:init()
-    self.logger:info("Инициализация T5 Controller...")
-    
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
+    self:findMachineProxy()
+    self:findTransposerFluid(self.plasmaTransposerProxy, "plasma.helium")
+    self:findTransposerFluid(self.coolantTransposerProxy, "supercoolant")
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.init = function ()
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+
+      if self.controllerProxy.hasWork() and temperature ~= nil and temperature ~= 0 then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
       end
     end
-
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
-    end
-
-  local function transferFluidOrItem(transposer, fluidNamePart, itemNamePart, amount)
-    if not transposer then return false, "no transposer" end
-    
-    -- 1. Сначала пытаемся как жидкость
-    local sidesWithFluid = {}
-    local emptyTanks = {}
-    
-    for side = 0, 5 do
-      local success, tanks = pcall(transposer.getFluidInTank, side)
-      if success and tanks then
-        local fluid = tanks[1]
-        if fluid and fluid.amount > 0 then
-          obj.logger:debug(string.format("T5: Сторона %d имеет жидкость %s (%s) объемом %d мб", side, tostring(fluid.name), tostring(fluid.label), fluid.amount))
-          if fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
-            table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
-          end
-        else
-          obj.logger:debug(string.format("T5: Сторона %d - пустой резервуар/люк", side))
-          table.insert(emptyTanks, side)
-        end
-      end
-    end
-    
-    local sourceSide = nil
-    local sinkCandidates = {}
-    
-    if #sidesWithFluid == 1 then
-      sourceSide = sidesWithFluid[1].side
-      for _, side in ipairs(emptyTanks) do
-        table.insert(sinkCandidates, side)
-      end
-    elseif #sidesWithFluid >= 2 then
-      table.sort(sidesWithFluid, function(a, b) return a.amount > b.amount end)
-      sourceSide = sidesWithFluid[1].side
-      table.insert(sinkCandidates, sidesWithFluid[#sidesWithFluid].side)
-      for _, side in ipairs(emptyTanks) do
-        table.insert(sinkCandidates, side)
-      end
-    end
-    
-    obj.logger:debug(string.format("T5: Источник=%s, Кандидаты-приемники: %s", tostring(sourceSide), table.concat(sinkCandidates, ", ")))
-    
-    if sourceSide then
-      for _, sinkSide in ipairs(sinkCandidates) do
-        obj.logger:debug(string.format("T5: Попытка transferFluid с %d на %d, кол-во: %d", sourceSide, sinkSide, amount))
-        local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
-        obj.logger:debug(string.format("T5: Результат transferFluid с %d на %d: ok=%s, transferred=%s", sourceSide, sinkSide, tostring(ok), tostring(transferred)))
-        if ok and transferred then
-          local amt = (type(transferred) == "number" and transferred) or amount
-          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-            return true, "fluid", amt
-          end
-        end
-      end
-    end
-    
-    -- 2. Если жидкость не сработала, пытаемся как предмет
-    local sidesWithItem = {}
-    local emptyInventories = {}
-    
-    for side = 0, 5 do
-      local success, size = pcall(transposer.getInventorySize, side)
-      if success and size and size > 0 then
-        local foundCount = 0
-        local foundSlot = nil
-        for slot = 1, size do
-          local succ2, stack = pcall(transposer.getStackInSlot, side, slot)
-          if succ2 and stack and stack.size > 0 and stack.name and (stack.name:lower():find(itemNamePart:lower()) or (stack.label and stack.label:lower():find(itemNamePart:lower()))) then
-            foundCount = foundCount + stack.size
-            if not foundSlot then foundSlot = slot end
-          end
-        end
-        
-        if foundCount > 0 then
-          table.insert(sidesWithItem, { side = side, slot = foundSlot, count = foundCount })
-        else
-          table.insert(emptyInventories, side)
-        end
-      end
-    end
-    
-    local itemSourceSide = nil
-    local sourceSlot = nil
-    local itemSinkCandidates = {}
-    
-    if #sidesWithItem == 1 then
-      itemSourceSide = sidesWithItem[1].side
-      sourceSlot = sidesWithItem[1].slot
-      for _, side in ipairs(emptyInventories) do
-        table.insert(itemSinkCandidates, side)
-      end
-    elseif #sidesWithItem >= 2 then
-      table.sort(sidesWithItem, function(a, b) return a.count > b.count end)
-      itemSourceSide = sidesWithItem[1].side
-      sourceSlot = sidesWithItem[1].slot
-      table.insert(itemSinkCandidates, sidesWithItem[#sidesWithItem].side)
-      for _, side in ipairs(emptyInventories) do
-        table.insert(itemSinkCandidates, side)
-      end
-    end
-    
-    if itemSourceSide and sourceSlot then
-      for _, itemSinkSide in ipairs(itemSinkCandidates) do
-        local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
-        if ok and transferred then
-          local amt = (type(transferred) == "number" and transferred) or amount
-          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-            return true, "item", amt
-          end
-        end
-      end
-    end
-    
-    return false, "not found"
-  end
-
-  function obj:init()
-    self.logger:info("Инициализация T5 Controller...")
-    
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
-      end
-    end
-
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
-    end
-
-    if self.config.plasmaTransposerAddress and self.config.plasmaTransposerAddress ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-      local success, proxy = pcall(component.proxy, self.config.plasmaTransposerAddress)
-      if success then self.plasmaTransposer = proxy end
-    end
-    
-    if self.config.coolantTransposerAddress and self.config.coolantTransposerAddress ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-      local success, proxy = pcall(component.proxy, self.config.coolantTransposerAddress)
-      if success then self.coolantTransposer = proxy end
-    end
-
-    self.logger:info("Инициализация завершена. Начальное состояние: idle.")
-    
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-    stateMod.t5.status = "IDLE"
-    stateMod.t5.color = theme.C.text
-    
-    return true
-  end
-
-  function obj:loop()
-    if not self.proxy then return end
-
-    local success, hasWork = pcall(self.proxy.hasWork)
-    if not success then return end
-
-    local temp = getTemperature()
-    self.logger:debug(string.format("Статус: %s, Работа: %s, Темп: %s", self.state, tostring(hasWork), tostring(temp)))
-
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-
-    if self.state == "idle" then
-      if hasWork then
-        self.logger:info("Обнаружена работа. Переход в heating.")
-        self.iterations = 0
-        self.fluidPumped = false
-        self.state = "heating"
-        stateMod.t5.status = "HEATING"
-        stateMod.t5.color = theme.C.warn
-      end
-    elseif self.state == "heating" then
-      if self.iterations >= 2 then
-        self.logger:info("Достигнут лимит итераций (2). Переход в waitEnd.")
-        self.state = "waitEnd"
-        stateMod.t5.status = "WAITING"
-        stateMod.t5.color = theme.C.partial
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.getWorkProgress() > 900 then 
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
         return
       end
 
-      -- Добавляем плазму для нагрева ОДИН раз
-      if not self.fluidPumped then
-        if self.plasmaTransposer then
-          local amount = self.config.plasmaCount or 100
-          local ok, type, transferred = transferFluidOrItem(self.plasmaTransposer, "plasma", "plasma", amount)
-          if ok then
-            self.logger:info("Нагрев: залито плазмы: " .. tostring(transferred) .. " mB")
-            self.fluidPumped = true
-          else
-            self.logger:warning("Не удалось подать плазму (проверьте буфер/бак)")
-          end
-        else
-          self.logger:warning("Транспозер плазмы не подключен!")
-        end
+      if self.controllerProxy.hasWork() then
+        self.stateMachine.data.iterations = 0
+        self.stateMachine:setState(self.stateMachine.states.heating)
       end
-      
-      -- Ждем пока нагреется
-      if temp and temp >= 10000 then
-        self.logger:info("Температура достигла 10000. Переход в cooling.")
-        self.state = "cooling"
-        self.fluidPumped = false
-        stateMod.t5.status = "COOLING"
-        stateMod.t5.color = theme.C.partial
-      end
-    elseif self.state == "cooling" then
-      -- Добавляем хладагент для охлаждения ОДИН раз
-      if not self.fluidPumped then
-        if self.coolantTransposer then
-          local amount = self.config.coolantCount or 2000
-          local ok, type, transferred = transferFluidOrItem(self.coolantTransposer, "coolant", "coolant", amount)
-          if ok then
-            self.logger:info("Охлаждение: залито хладагента: " .. tostring(transferred) .. " mB")
-            self.fluidPumped = true
-          else
-            self.logger:warning("Не удалось подать хладагент (проверьте буфер/бак)")
-          end
-        else
-          self.logger:warning("Транспозер хладагента не подключен!")
-        end
+    end
+
+    self.stateMachine.states.heating = self.stateMachine:createState("Heating")
+    self.stateMachine.states.heating.init = function ()
+      if self.stateMachine.data.iterations >= 2 then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
       end
 
-      -- Ждем пока остынет
-      if temp and temp <= 0 then
-        self.logger:info("Температура упала до 0. Возврат в heating, итерация +1.")
-        self.iterations = self.iterations + 1
-        self.state = "heating"
-        self.fluidPumped = false
-        stateMod.t5.status = "HEATING"
-        stateMod.t5.color = theme.C.warn
+      local _, result = self.plasmaTransposerProxy.transferFluid(
+        self.transposerLiquids["plasma.helium"].side,
+        sides.up,
+        self.plasmaCount,
+        self.transposerLiquids["plasma.helium"].tank)
+
+      if result ~= self.plasmaCount then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T5] Not enough Helium Plasma for craft")
       end
-    elseif self.state == "waitEnd" then
-      self.logger:info("Ожидание события cycle_end...")
-      -- В параллельном потоке мы можем позволить себе ждать ивент с таймаутом!
-      local ev, arg = event.pull(10, "cycle_end")
-      if ev then
-        self.logger:info("Получено событие cycle_end. Возврат в idle.")
-        self.state = "idle"
-        stateMod.t5.status = "IDLE"
-        stateMod.t5.color = theme.C.text
-      else
-        self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
-        if not hasWork then
-          self.logger:info("Машина не работает. Возврат в idle.")
-          self.state = "idle"
-          stateMod.t5.status = "IDLE"
-          stateMod.t5.color = theme.C.text
-        end
+    end
+    self.stateMachine.states.heating.update = function()
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+
+      if self.controllerProxy.hasWork() == false then
+        self.stateMachine:setState(self.stateMachine.states.idle)
       end
+
+      if temperature >= 10000 then
+        self.stateMachine:setState(self.stateMachine.states.cooling)
+      end
+    end
+
+    self.stateMachine.states.cooling = self.stateMachine:createState("Cooling")
+    self.stateMachine.states.cooling.init = function ()
+      local _, result = self.coolantTransposerProxy.transferFluid(
+        self.transposerLiquids["supercoolant"].side,
+        sides.up,
+        self.coolantCount,
+        self.transposerLiquids["supercoolant"].tank)
+
+      if result ~= self.coolantCount then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T5] Not enough Super Coolant for craft")
+      end
+    end
+    self.stateMachine.states.cooling.update = function()
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+
+      if self.controllerProxy.hasWork() == false then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+
+      if temperature <= 0 then
+        self.stateMachine:setState(self.stateMachine.states.heating)
+        self.stateMachine.data.iterations = self.stateMachine.data.iterations + 1
+      end
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitplasmaheater")
+
+    if self.controllerProxy == nil then
+      error("[T5] Extreme Temperature Fluctuation Purification Unit not found")
+    end
+
+    self.plasmaTransposerProxy = componentDiscoverLib.discoverProxy(plasmaTransposerAddress, "[T5] Plasma Transposer", "transposer")
+    self.coolantTransposerProxy = componentDiscoverLib.discoverProxy(coolantTransposerAddress, "[T5] Coolant Transposer", "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerFluid(proxy, fluidName)
+    local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, {fluidName}, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T5] Can't find liquid: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerLiquids[key] = value
     end
   end
 
-  function obj:getState()
-    return string.format("State: [%s] Iter: [%d]", self.state, self.iterations)
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
   end
 
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
   return obj
 end
 

@@ -1,290 +1,187 @@
-local component = require("component")
-local event = require("event")
 local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
 
 local t4controller = {}
 
-function t4controller:new(config, logger)
+function t4controller:newFormConfig(config)
+  return self:new(config.hydrochloricAcidTransposerAddress, config.sodiumHydroxideTransposerAddress)
+end
+
+function t4controller:new(hydrochloricAcidTransposerAddress, sodiumHydroxideTransposerAddress)
   local obj = {}
-  obj.config = config
-  obj.logger = logger
-  obj.proxy = nil
-  obj.hydrochloricAcidTransposer = nil
-  obj.sodiumHydroxideTransposer = nil
-  
-  obj.state = "idle"
 
-  local function getPhValue()
-    if not obj.proxy then return nil end
-    local success, info = pcall(obj.proxy.getSensorInformation)
-    if not success or not info then return nil end
-    
-    for _, line in ipairs(info) do
-      if line:find("Current pH Value:") then
-        local phStr = line:match("Current pH Value:%s*§?%w?([%d%.]+)")
-        if phStr then
-          return tonumber(phStr)
-        end
-      end
-    end
-    return nil
-  end
+  obj.hydrochloricAcidTransposerProxy = nil
+  obj.sodiumHydroxideTransposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerLiquids = {}
+  obj.transposerItems = {}
 
   function obj:init()
-    self.logger:info("Инициализация T4 Controller...")
-    
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
+    self:findMachineProxy()
+    self:findTransposerFluid(self.hydrochloricAcidTransposerProxy, "hydrochloricacid_gt5u")
+    self:findTransposerItem(self.sodiumHydroxideTransposerProxy, "Sodium Hydroxide Dust")
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.hasWork() then
+        self.stateMachine:setState(self.stateMachine.states.work)
       end
     end
 
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
-    end
+    self.stateMachine.states.work = self.stateMachine:createState("Work")
+    self.stateMachine.states.work.update = function()
+      local phValue = self.gtSensorParser:getNumber(4, "Current pH Value:")
 
-  local function transferFluidOrItem(transposer, fluidNamePart, itemNamePart, amount)
-    if not transposer then return false, "no transposer" end
-    
-    -- 1. Сначала пытаемся как жидкость
-    local sidesWithFluid = {}
-    local emptyTanks = {}
-    
-    for side = 0, 5 do
-      local success, tanks = pcall(transposer.getFluidInTank, side)
-      if success and tanks then
-        local fluid = tanks[1]
-        if fluid and fluid.amount > 0 then
-          obj.logger:debug(string.format("T4: Сторона %d имеет жидкость %s (%s) объемом %d мб", side, tostring(fluid.name), tostring(fluid.label), fluid.amount))
-          if fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
-            table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
-          end
-        else
-          obj.logger:debug(string.format("T4: Сторона %d - пустой резервуар/люк", side))
-          table.insert(emptyTanks, side)
-        end
-      end
-    end
-    
-    local sourceSide = nil
-    local sinkCandidates = {}
-    
-    if #sidesWithFluid == 1 then
-      sourceSide = sidesWithFluid[1].side
-      for _, side in ipairs(emptyTanks) do
-        table.insert(sinkCandidates, side)
-      end
-    elseif #sidesWithFluid >= 2 then
-      table.sort(sidesWithFluid, function(a, b) return a.amount > b.amount end)
-      sourceSide = sidesWithFluid[1].side
-      table.insert(sinkCandidates, sidesWithFluid[#sidesWithFluid].side)
-      for _, side in ipairs(emptyTanks) do
-        table.insert(sinkCandidates, side)
-      end
-    end
-    
-    obj.logger:debug(string.format("T4: Источник=%s, Кандидаты-приемники: %s", tostring(sourceSide), table.concat(sinkCandidates, ", ")))
-    
-    if sourceSide then
-      for _, sinkSide in ipairs(sinkCandidates) do
-        obj.logger:debug(string.format("T4: Попытка transferFluid с %d на %d, кол-во: %d", sourceSide, sinkSide, amount))
-        local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
-        obj.logger:debug(string.format("T4: Результат transferFluid с %d на %d: ok=%s, transferred=%s", sourceSide, sinkSide, tostring(ok), tostring(transferred)))
-        if ok and transferred then
-          local amt = (type(transferred) == "number" and transferred) or amount
-          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-            return true, "fluid", amt
-          end
-        end
-      end
-    end
-    
-    -- 2. Если жидкость не сработала, пытаемся как предмет
-    local sidesWithItem = {}
-    local emptyInventories = {}
-    
-    for side = 0, 5 do
-      local success, size = pcall(transposer.getInventorySize, side)
-      if success and size and size > 0 then
-        local foundCount = 0
-        local foundSlot = nil
-        for slot = 1, size do
-          local succ2, stack = pcall(transposer.getStackInSlot, side, slot)
-          if succ2 and stack and stack.size > 0 and stack.name and (stack.name:lower():find(itemNamePart:lower()) or (stack.label and stack.label:lower():find(itemNamePart:lower()))) then
-            foundCount = foundCount + stack.size
-            if not foundSlot then foundSlot = slot end
-          end
-        end
-        
-        if foundCount > 0 then
-          table.insert(sidesWithItem, { side = side, slot = foundSlot, count = foundCount })
-        else
-          table.insert(emptyInventories, side)
-        end
-      end
-    end
-    
-    local itemSourceSide = nil
-    local sourceSlot = nil
-    local itemSinkCandidates = {}
-    
-    if #sidesWithItem == 1 then
-      itemSourceSide = sidesWithItem[1].side
-      sourceSlot = sidesWithItem[1].slot
-      for _, side in ipairs(emptyInventories) do
-        table.insert(itemSinkCandidates, side)
-      end
-    elseif #sidesWithItem >= 2 then
-      table.sort(sidesWithItem, function(a, b) return a.count > b.count end)
-      itemSourceSide = sidesWithItem[1].side
-      sourceSlot = sidesWithItem[1].slot
-      table.insert(itemSinkCandidates, sidesWithItem[#sidesWithItem].side)
-      for _, side in ipairs(emptyInventories) do
-        table.insert(itemSinkCandidates, side)
-      end
-    end
-    
-    if itemSourceSide and sourceSlot then
-      for _, itemSinkSide in ipairs(itemSinkCandidates) do
-        local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
-        if ok and transferred then
-          local amt = (type(transferred) == "number" and transferred) or amount
-          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-            return true, "item", amt
-          end
-        end
-      end
-    end
-    
-    return false, "not found"
-  end
-
-  function obj:init()
-    self.logger:info("Инициализация T4 Controller...")
-    
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
-      end
-    end
-
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
-    end
-
-    if self.config.hydrochloricAcidTransposerAddress and self.config.hydrochloricAcidTransposerAddress ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-      local success, proxy = pcall(component.proxy, self.config.hydrochloricAcidTransposerAddress)
-      if success then self.hydrochloricAcidTransposer = proxy end
-    end
-
-    if self.config.sodiumHydroxideTransposerAddress and self.config.sodiumHydroxideTransposerAddress ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-      local success, proxy = pcall(component.proxy, self.config.sodiumHydroxideTransposerAddress)
-      if success then self.sodiumHydroxideTransposer = proxy end
-    end
-
-    self.logger:info("Инициализация завершена. Начальное состояние: idle.")
-    
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-    stateMod.t4.status = "IDLE"
-    stateMod.t4.color = theme.C.text
-    
-    return true
-  end
-
-  function obj:loop()
-    if not self.proxy then return end
-
-    local success, hasWork = pcall(self.proxy.hasWork)
-    if not success then return end
-
-    local ph = getPhValue()
-    self.logger:debug(string.format("Статус: %s, Работа: %s, pH: %s", self.state, tostring(hasWork), tostring(ph)))
-
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-
-    if self.state == "idle" then
-      if hasWork then
-        self.logger:info("Обнаружена работа. Переход в work.")
-        self.state = "work"
-        stateMod.t4.status = "WORKING"
-        stateMod.t4.color = theme.C.warn
-      end
-    elseif self.state == "work" then
-      if not ph then
-        self.logger:warning("Не удалось определить pH. Ждем.")
+      if phValue == nil then
         return
       end
 
-      local diffPh = 7 - ph
+      local diffPh = 7 - phValue
       local count = math.floor(math.abs(diffPh / 0.01))
 
       if count == 0 then
-        self.logger:info("pH в норме (7). Переход в waitEnd.")
-        self.state = "waitEnd"
-        stateMod.t4.status = "WAITING"
-        stateMod.t4.color = theme.C.partial
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
         return
       end
 
       if diffPh > 0 then
-        self.logger:info("pH низкий (" .. ph .. "). Требуется Sodium Hydroxide: " .. count)
-        if self.sodiumHydroxideTransposer then
-          local ok, type, transferred = transferFluidOrItem(self.sodiumHydroxideTransposer, "sodium", "sodium", math.min(count, 64))
-          if ok then
-            self.logger:info(string.format("Добавлено Sodium Hydroxide (%s): %s шт/mB", type, tostring(transferred)))
-          else
-            self.logger:warning("Не удалось добавить Sodium Hydroxide (проверьте наличие в буфере)")
-          end
-        else
-          self.logger:warning("Транспозер Sodium Hydroxide не подключен!")
-        end
+        self:putSodiumHydroxide(count)
       else
-        self.logger:info("pH высокий (" .. ph .. "). Требуется Hydrochloric Acid: " .. count)
-        if self.hydrochloricAcidTransposer then
-          local ok, type, transferred = transferFluidOrItem(self.hydrochloricAcidTransposer, "hydrochloric", "hydrochloric", math.min(count, 64))
-          if ok then
-            self.logger:info(string.format("Добавлено Hydrochloric Acid (%s): %s шт/mB", type, tostring(transferred)))
-          else
-            self.logger:warning("Не удалось добавить Hydrochloric Acid (проверьте наличие в буфере)")
-          end
-        else
-          self.logger:warning("Транспозер Hydrochloric Acid не подключен!")
-        end
+        self:putHydrochloricAcid(count)
       end
-    elseif self.state == "waitEnd" then
-      self.logger:info("Ожидание события cycle_end...")
-      local ev, arg = event.pull(10, "cycle_end")
-      if ev then
-        self.logger:info("Получено событие cycle_end. Возврат в idle.")
-        self.state = "idle"
-        stateMod.t4.status = "IDLE"
-        stateMod.t4.color = theme.C.text
+
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitphadjustment")
+
+    if self.controllerProxy == nil then
+      error("[T4] pH Neutralization Purification Unit not found")
+    end
+
+    self.hydrochloricAcidTransposerProxy = componentDiscoverLib.discoverProxy(
+      hydrochloricAcidTransposerAddress,
+      "[T4] Hydrochloric Acid Transposer",
+      "transposer")
+    self.sodiumHydroxideTransposerProxy = componentDiscoverLib.discoverProxy(
+      sodiumHydroxideTransposerAddress,
+      "[T4] Sodium Hydroxide Transposer",
+      "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerItem(proxy, itemLabels)
+    local result, skipped = componentDiscoverLib.discoverTransposerItemStorage(proxy, {itemLabels}, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T4] Can't find items: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerItems[key] = value
+    end
+  end
+
+  function obj:findTransposerFluid(proxy, fluidName)
+    local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, {fluidName}, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T4] Can't find liquid: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerLiquids[key] = value
+    end
+  end
+
+  function obj:putSodiumHydroxide(count) 
+    for i = 1, math.ceil(count / 64), 1 do
+      local sodiumHydroxideCount = 0
+
+      if (count - 64 * (i - 1) > 64) then
+        sodiumHydroxideCount = 64
       else
-        self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
-        if not hasWork then
-          self.logger:info("Машина не работает. Возврат в idle.")
-          self.state = "idle"
-          stateMod.t4.status = "IDLE"
-          stateMod.t4.color = theme.C.text
-        end
+        sodiumHydroxideCount = math.floor(count % 64)
+      end
+
+      local result = self.sodiumHydroxideTransposerProxy.transferItem(
+        self.transposerItems["Sodium Hydroxide Dust"].side,
+        sides.bottom,
+        sodiumHydroxideCount)
+
+      if result ~= sodiumHydroxideCount then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T4] Not enough Sodium Hydroxide for craft")
+        break
       end
     end
   end
 
-  function obj:getState()
-    return string.format("State: [%s]", self.state)
+  function obj:putHydrochloricAcid(count)
+    local hydrochloricAcidCount = count * 10
+
+    local _, result = self.hydrochloricAcidTransposerProxy.transferFluid(
+      self.transposerLiquids["hydrochloricacid_gt5u"].side,
+      sides.bottom,
+      hydrochloricAcidCount,
+      self.transposerLiquids["hydrochloricacid_gt5u"].tank)
+
+    if result ~= hydrochloricAcidCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T4] Not enough Hydrochloric Acid for craft")
+    end
+
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
   end
 
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
+  end
+
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
   return obj
 end
 

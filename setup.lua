@@ -1,202 +1,377 @@
+-- setup.lua
 local component = require("component")
-local filesystem = require("filesystem")
-local term = require("term")
 local event = require("event")
 local keyboard = require("keyboard")
+local unicode = require("unicode")
+local theme = require("lib.theme")
+local registry = require("registry")
 
-local registryPath = "/home/registry.lua"
+local gpu = component.isAvailable("gpu") and component.gpu or nil
+if not gpu then io.write("GPU not found!\n"); return end
 
--- Загрузка реестра
-local function loadRegistry()
-  if filesystem.exists(registryPath) then
-    local ok, res = pcall(loadfile(registryPath))
-    if ok then return res end
+theme.init(gpu)
+local W, H = theme.getRes()
+local C = theme.C
+
+local regData = registry.load()
+
+local LEFT_W = 24
+local RX = LEFT_W + 3
+
+local function gset(x, y, text, fg, bg) theme.gset(x, y, text, fg, bg) end
+local function gfill(x, y, w, h, ch, fg, bg) theme.gfill(x, y, w, h, ch, fg, bg) end
+local function pad(s, n) return theme.pad(s, n) end
+
+local function drawFrame()
+  gfill(1, 1, W, H, " ", C.text, C.bg)
+  theme.drawHeader("GTNH WATER LINE - SETUP", "Hardware Registration Wizard")
+  
+  -- Left border divider
+  for row = 4, H-3 do
+    gset(LEFT_W + 1, row, "|", C.border, C.bg)
   end
-  -- Если файла нет или он битый, возвращаем дефолтную структуру
-  return {
-    lineController = { machineAddress = nil },
-    controllers = {
-      t3 = {}, t4 = {}, t5 = {}, t6 = {}, t7 = {}, t8 = {}
-    }
-  }
+  gset(LEFT_W + 1, H-2, "+", C.border, C.bg)
 end
 
--- Сохранение реестра
-local function saveRegistry(reg)
-  local f = io.open(registryPath, "w")
-  if f then
-    f:write("return {\n")
-    f:write("  lineController = {\n")
-    f:write(string.format("    machineAddress = %s,\n", reg.lineController.machineAddress and string.format("%q", reg.lineController.machineAddress) or "nil"))
-    f:write("  },\n")
-    f:write("  controllers = {\n")
-    for tier, data in pairs(reg.controllers) do
-      f:write(string.format("    %s = {\n", tier))
-      for k, v in pairs(data) do
-        f:write(string.format("      %s = %s,\n", k, v and string.format("%q", v) or "nil"))
-      end
-      f:write("    },\n")
-    end
-    f:write("  }\n")
-    f:write("}\n")
-    f:close()
-    return true
-  end
-  return false
+local function drawFooter(keys)
+  theme.drawFooter(keys)
 end
 
-local registry = loadRegistry()
-
-local function clear()
-  term.clear()
+local function clearRight()
+  gfill(LEFT_W + 2, 4, W - LEFT_W - 2, H - 6, " ", C.text, C.bg)
 end
 
-local function printHeader(title)
-  print("==========================================")
-  print("  " .. title)
-  print("==========================================")
-end
-
-local function selectMenu(title, options)
-  while true do
-    clear()
-    printHeader(title)
-    for i, opt in ipairs(options) do
-      print(string.format("%d. %s", i, opt))
-    end
-    print("\n0. Выход / Назад")
-    
-    io.write("\nВыберите пункт: ")
-    local input = io.read()
-    local num = tonumber(input)
-    
-    if num == 0 then return nil end
-    if num and num >= 1 and num <= #options then
-      return num
+local function drawMenu(items, sel)
+  gset(2, 5, "MENU", C.dim, C.bg)
+  gset(2, 6, string.rep("-", LEFT_W - 2), C.border, C.bg)
+  for i, item in ipairs(items) do
+    local y = 6 + i
+    if i == sel then
+      gfill(2, y, LEFT_W - 1, 1, " ", C.sel_fg, C.sel_bg)
+      gset(3, y, item.label, C.sel_fg, C.sel_bg)
+    else
+      gfill(2, y, LEFT_W - 1, 1, " ", C.text, C.bg)
+      gset(3, y, item.label, C.text, C.bg)
     end
   end
 end
 
--- Сканирование компонентов
-local function scanComponents()
+-- Scanning helpers
+local function scanMachinesAndTransposers()
   local machines = {}
   local transposers = {}
+  local interfaces = {}
   
   for addr, type in component.list() do
     if type == "gt_machine" then
       local proxy = component.proxy(addr)
       if proxy then
-        local name = proxy.getName()
-        table.insert(machines, {address = addr, name = name})
+        local ok, name = pcall(proxy.getName)
+        if ok and name then
+          table.insert(machines, { address = addr, name = name })
+        end
       end
     elseif type == "transposer" then
       table.insert(transposers, addr)
+    elseif type == "me_interface" then
+      table.insert(interfaces, addr)
     end
   end
-  
-  return machines, transposers
+  return machines, transposers, interfaces
 end
 
--- Главный цикл
-local function main()
-  local machines, transposers = scanComponents()
+-- Interactive single item selector from list
+local function selectFromList(title, list, itemFormatter)
+  local sel = 1
+  local scroll = 1
+  local viewH = H - 10
   
   while true do
-    local choice = selectMenu("SETUP - Главное меню", {
-      "Выбрать Центральный Контроллер (WPP)",
-      "Настроить Тиры (T3 - T8)",
-      "Показать текущую конфигурацию"
-    })
+    clearRight()
+    gset(RX, 4, "--- " .. title:upper() .. " ---", C.title, C.bg)
+    gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
     
-    if not choice then break end
-    
-    if choice == 1 then
-      -- Выбор WPP
-      local wppList = {}
-      for _, m in ipairs(machines) do
-        if m.name == "multimachine.purificationplant" then
-          table.insert(wppList, m.address)
-        end
+    if #list == 0 then
+      gset(RX, 7, "No compatible components found on network.", C.warn, C.bg)
+      gset(RX, 9, "Press Enter to return...", C.dim, C.bg)
+      drawFooter({{"Enter", "Back"}})
+      while true do
+        local _, _, _, code = event.pull("key_down")
+        if code == 28 or code == 1 then return nil end
       end
-      
-      if #wppList == 0 then
-        print("Машины 'multimachine.purificationplant' не найдены!")
-        os.sleep(2)
+    end
+    
+    for i = 0, viewH - 1 do
+      local idx = scroll + i
+      local y = 7 + i
+      if idx <= #list then
+        local item = list[idx]
+        local label = itemFormatter(item, idx)
+        label = pad(label, W - LEFT_W - 6)
+        if idx == sel then
+          gfill(RX, y, W - LEFT_W - 4, 1, " ", C.sel_fg, C.sel_bg)
+          gset(RX, y, label, C.sel_fg, C.sel_bg)
+        else
+          gfill(RX, y, W - LEFT_W - 4, 1, " ", C.text, C.bg)
+          gset(RX, y, label, C.text, C.bg)
+        end
       else
-        local opts = {}
-        for i, addr in ipairs(wppList) do
-          table.insert(opts, string.format("WPP [%s...]", addr:sub(1, 8)))
-        end
-        local sel = selectMenu("Выберите WPP", opts)
-        if sel then
-          registry.lineController.machineAddress = wppList[sel]
-          saveRegistry(registry)
-          print("Сохранено!")
-          os.sleep(1)
-        end
+        gfill(RX, y, W - LEFT_W - 4, 1, " ", C.text, C.bg)
       end
-      
-    elseif choice == 2 then
-      -- Настройка Тиров
-      local tiers = {
-        {key = "t3", name = "T3 (Flocculation)", count = 1, roles = {"transposerAddress"}},
-        {key = "t4", name = "T4 (pH Neutralization)", count = 2, roles = {"hydrochloricAcidTransposerAddress", "sodiumHydroxideTransposerAddress"}},
-        {key = "t5", name = "T5 (Extreme Temperature)", count = 2, roles = {"plasmaTransposerAddress", "coolantTransposerAddress"}},
-        {key = "t6", name = "T6 (High Energy Laser)", count = 1, roles = {"transposerAddress"}},
-        {key = "t7", name = "T7 (Residual Degasser)", count = 4, roles = {"inertGasTransposerAddress", "superConductorTransposerAddress", "netroniumTransposerAddress", "coolantTransposerAddress"}},
-        {key = "t8", name = "T8 (Absolute Baryonic)", count = 2, roles = {"transposerAddress", "subMeInterfaceAddress"}}
-      }
-      
-      local tierOpts = {}
-      for _, t in ipairs(tiers) do
-        table.insert(tierOpts, t.name)
-      end
-      
-      local selTier = selectMenu("Выберите Тир для настройки", tierOpts)
-      if selTier then
-        local tier = tiers[selTier]
-        
-        for i = 1, tier.count do
-          local role = tier.roles[i]
-          
-          local opts = {}
-          for j, addr in ipairs(transposers) do
-            local isAssigned = false
-            -- Проверяем, не занят ли транспозер
-            for tKey, tData in pairs(registry.controllers) do
-              for rKey, rAddr in pairs(tData) do
-                if rAddr == addr then isAssigned = true end
-              end
-            end
-            
-            local statusStr = isAssigned and " [ЗАНЯТ]" or ""
-            table.insert(opts, string.format("Transposer [%s...]%s", addr:sub(1, 8), statusStr))
-          end
-          
-          local selTrans = selectMenu("Привязка для роли: " .. role, opts)
-          if selTrans then
-            registry.controllers[tier.key][role] = transposers[selTrans]
-            saveRegistry(registry)
-            print("Привязано!")
-            os.sleep(1)
-          end
+    end
+    
+    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Confirm"}, {"Esc", "Cancel"}})
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 200 then -- Up
+        if sel > 1 then
+          sel = sel - 1
+          if sel < scroll then scroll = sel end
         end
-      end
-      
-    elseif choice == 3 then
-      clear()
-      printHeader("Текущая конфигурация")
-      print("WPP: " .. (registry.lineController.machineAddress or "Не выбран"))
-      for tier, data in pairs(registry.controllers) do
-        print("\n" .. tier:upper() .. ":")
-        for k, v in pairs(data) do
-          print(string.format("  %s -> %s", k, v or "nil"))
+      elseif code == 208 then -- Down
+        if sel < #list then
+          sel = sel + 1
+          if sel >= scroll + viewH then scroll = sel - viewH + 1 end
         end
+      elseif code == 28 then -- Enter
+        return list[sel]
+      elseif code == 1 or code == 14 then -- Esc / Backspace
+        return nil
       end
-      print("\nНажмите Enter для продолжения...")
-      io.read()
     end
   end
 end
 
-main()
+-- Configure WPP Controller
+local function configureWPP()
+  clearRight()
+  gset(RX, 4, "--- CONFIGURE MAIN LINE (WPP) ---", C.title, C.bg)
+  gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+  
+  local current = regData.lineController.machineAddress or "Not bound (autodetect)"
+  gset(RX, 7, "Current WPP Address:", C.text, C.bg)
+  gset(RX, 8, current, current == "Not bound (autodetect)" and C.warn or C.ok, C.bg)
+  
+  gset(RX, 10, "1. Bind new WPP address from network", C.text, C.bg)
+  gset(RX, 11, "2. Reset to autodetect mode", C.text, C.bg)
+  gset(RX, 13, "Press [Esc] to return", C.dim, C.bg)
+  
+  drawFooter({{"1", "Bind WPP"}, {"2", "Reset"}, {"Esc", "Back"}})
+  
+  while true do
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 2 then -- '1'
+        local machines = scanMachinesAndTransposers()
+        local wppCandidates = {}
+        for _, m in ipairs(machines) do
+          if m.name == "multimachine.purificationplant" then
+            table.insert(wppCandidates, m)
+          end
+        end
+        local selected = selectFromList("Select WPP Machine", wppCandidates, function(item)
+          return string.format("%s... (%s)", item.address:sub(1, 12), item.name)
+        end)
+        if selected then
+          regData.lineController.machineAddress = selected.address
+          return true
+        end
+        return false
+      elseif code == 3 then -- '2'
+        regData.lineController.machineAddress = nil
+        return true
+      elseif code == 1 or code == 14 then -- Esc
+        return false
+      end
+    end
+  end
+end
+
+-- Tiers Configuration Submenu
+local function configureTiers()
+  local tiers = {
+    { key = "t3", label = "T3 Flocculation", roles = { { key = "transposerAddress", name = "Polyaluminium Transposer" } } },
+    { key = "t4", label = "T4 pH Adjustment", roles = { { key = "hydrochloricAcidTransposerAddress", name = "HCl Acid Transposer" }, { key = "sodiumHydroxideTransposerAddress", name = "NaOH Dust Transposer" } } },
+    { key = "t5", label = "T5 Extreme Temp", roles = { { key = "plasmaTransposerAddress", name = "Helium Plasma Transposer" }, { key = "coolantTransposerAddress", name = "Super Coolant Transposer" } } },
+    { key = "t6", label = "T6 UV Treatment", roles = { { key = "transposerAddress", name = "Lens Transposer" } } },
+    { key = "t7", label = "T7 Degasser", roles = { { key = "inertGasTransposerAddress", name = "Inert Gas Transposer" }, { key = "superConductorTransposerAddress", name = "Supercond Transposer" }, { key = "netroniumTransposerAddress", name = "Neutronium Transposer" }, { key = "coolantTransposerAddress", name = "Super Coolant Transposer" } } },
+    { key = "t8", label = "T8 Subatomic Extr", roles = { { key = "transposerAddress", name = "Quark Transposer" }, { key = "subMeInterfaceAddress", name = "Sub-AE ME Interface", isInterface = true } } }
+  }
+  
+  local sel = 1
+  while true do
+    clearRight()
+    gset(RX, 4, "--- CONFIGURE WATER LINE TIERS ---", C.title, C.bg)
+    gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+    
+    for idx, t in ipairs(tiers) do
+      local y = 7 + (idx - 1) * 2
+      local treg = regData.controllers[t.key] or {}
+      local status = treg.enable and "[ENABLED]" or "[DISABLED]"
+      local scol = treg.enable and C.ok or C.dim
+      
+      local label = string.format("%d. %-20s %s", idx, t.label, status)
+      if idx == sel then
+        gfill(RX, y, W - LEFT_W - 4, 1, " ", C.sel_fg, C.sel_bg)
+        gset(RX, y, label, C.sel_fg, C.sel_bg)
+      else
+        gfill(RX, y, W - LEFT_W - 4, 1, " ", C.text, C.bg)
+        gset(RX, y, label, C.text, C.bg)
+        gset(RX + 22, y, status, scol, C.bg)
+      end
+    end
+    
+    gset(RX, H-5, "Press Enter to configure selected tier.", C.dim, C.bg)
+    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Configure"}, {"Esc", "Back"}})
+    
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 200 then -- Up
+        if sel > 1 then sel = sel - 1 end
+      elseif code == 208 then -- Down
+        if sel < #tiers then sel = sel + 1 end
+      elseif code == 28 then -- Enter
+        -- Configure selected tier
+        local tier = tiers[sel]
+        local exitTier = false
+        while not exitTier do
+          clearRight()
+          gset(RX, 4, "--- CONFIG: " .. tier.label:upper() .. " ---", C.title, C.bg)
+          gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+          
+          local treg = regData.controllers[tier.key] or {}
+          local enLabel = treg.enable and "Enabled: YES" or "Enabled: NO"
+          gset(RX, 7, "1. Toggle State: " .. enLabel, C.text, C.bg)
+          gset(RX + 17, 7, treg.enable and "YES" or "NO", treg.enable and C.ok or C.ring_down, C.bg)
+          
+          gset(RX, 9, "Transposers / Interfaces:", C.dim, C.bg)
+          local y = 10
+          for rIdx, role in ipairs(tier.roles) do
+            local addr = treg[role.key] or "Not configured"
+            local acol = (addr == "Not configured") and C.ring_down or C.ok
+            local rowLabel = string.format("   %d) %-25s: %s", rIdx + 1, role.name, addr:sub(1, 10) .. "...")
+            gset(RX, y, rowLabel, C.text, C.bg)
+            gset(RX + 3 + 27, y, addr:sub(1, 12), acol, C.bg)
+            y = y + 1
+          end
+          
+          gset(RX, H-5, "Press number to select or Esc to back.", C.dim, C.bg)
+          drawFooter({{"1", "Toggle State"}, {"2-9", "Bind Hardware"}, {"Esc", "Back"}})
+          
+          local ev2, _, _, code2 = event.pull("key_down")
+          if ev2 == "key_down" then
+            if code2 == 2 then -- '1'
+              treg.enable = not treg.enable
+              regData.controllers[tier.key] = treg
+            elseif code2 >= 3 and code2 <= 1 + #tier.roles + 1 then -- '2' - '9'
+              local rIdx = code2 - 2
+              local role = tier.roles[rIdx]
+              if role then
+                local _, transposers, interfaces = scanMachinesAndTransposers()
+                local list = role.isInterface and interfaces or transposers
+                
+                local selected = selectFromList("Select for " .. role.name, list, function(item) return item end)
+                if selected then
+                  treg[role.key] = selected
+                  regData.controllers[tier.key] = treg
+                end
+              end
+            elseif code2 == 1 or code2 == 14 then -- Esc
+              exitTier = true
+            end
+          end
+        end
+      elseif code == 1 or code == 14 then -- Esc
+        break
+      end
+    end
+  end
+end
+
+-- Show Registry Details
+local function showRegistry()
+  clearRight()
+  gset(RX, 4, "--- CONFIGURATION REGISTRY ---", C.title, C.bg)
+  gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+  
+  local y = 7
+  gset(RX, y, "WPP Address: " .. (regData.lineController.machineAddress or "AUTODETECT"), C.text, C.bg)
+  y = y + 2
+  
+  for i = 3, 8 do
+    local tkey = "t" .. i
+    local treg = regData.controllers[tkey] or {}
+    local status = treg.enable and "ENABLED" or "DISABLED"
+    local scol = treg.enable and C.ok or C.dim
+    gset(RX, y, string.format("T%d (%s):", i, status), C.title, C.bg)
+    gset(RX + 9, y, status, scol, C.bg)
+    y = y + 1
+    
+    local hasItems = false
+    for k, v in pairs(treg) do
+      if k ~= "enable" then
+        gset(RX, y, string.format("  %-16s: %s", k, tostring(v):sub(1, 15) .. "..."), C.text, C.bg)
+        y = y + 1
+        hasItems = true
+      end
+    end
+    if not hasItems then
+      gset(RX, y, "  (No transposers required/configured)", C.dim, C.bg)
+      y = y + 1
+    end
+    y = y + 1
+    if y >= H - 4 then break end
+  end
+  
+  gset(RX, H-3, "Press any key to return...", C.dim, C.bg)
+  drawFooter({{"Any Key", "Back"}})
+  event.pull("key_down")
+end
+
+local MENU_ITEMS = {
+  { label = "1. Main WPP Config", fn = configureWPP },
+  { label = "2. Configure Tiers", fn = configureTiers },
+  { label = "3. Show Registry  ", fn = showRegistry },
+  { label = "4. Save & Exit   ", fn = function() registry.save(regData); return "exit" end }
+}
+
+local function run()
+  drawFrame()
+  local sel = 1
+  
+  while true do
+    drawMenu(MENU_ITEMS, sel)
+    drawFooter({{"Up/Dn", "Move"}, {"Enter", "Select"}, {"Esc", "Cancel"}})
+    
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 200 then -- Up
+        if sel > 1 then sel = sel - 1 end
+      elseif code == 208 then -- Down
+        if sel < #MENU_ITEMS then sel = sel + 1 end
+      elseif code == 28 then -- Enter
+        local res = MENU_ITEMS[sel].fn()
+        if res == "exit" then break end
+        drawFrame()
+      elseif code == 1 then -- Esc
+        break
+      end
+    end
+  end
+  
+  -- Restore screen
+  gpu.setBackground(0x000000)
+  gpu.setForeground(0xFFFFFF)
+  gpu.fill(1, 1, W, H, " ")
+end
+
+local ok, err = pcall(run)
+if not ok then
+  gpu.setBackground(0x000000)
+  gpu.setForeground(0xFF2244)
+  gpu.fill(1, 1, W, H, " ")
+  gpu.set(1, 1, "SETUP UTILITY CRASHED:")
+  gpu.set(1, 3, tostring(err))
+  gpu.set(1, H, "Press any key to exit...")
+  event.pull("key_down")
+end

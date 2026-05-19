@@ -1,377 +1,255 @@
-local component = require("component")
-local event = require("event")
 local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
 
 local t7controller = {}
 
-function t7controller:new(config, logger)
-  local obj = {}
-  obj.config = config
-  obj.logger = logger
-  obj.proxy = nil
-  
-  -- Транспозеры
-  obj.inertGasTransposer = nil
-  obj.superConductorTransposer = nil
-  obj.neutroniumTransposer = nil
-  obj.coolantTransposer = nil
-  
-  obj.state = "idle"
+function t7controller:newFormConfig(config)
+  return self:new(
+    config.inertGasTransposerAddress,
+    config.superConductorTransposerAddress,
+    config.netroniumTransposerAddress,
+    config.coolantTransposerAddress)
+end
 
-  local function getBitString()
-    if not obj.proxy then return nil end
-    local success, info = pcall(obj.proxy.getSensorInformation)
-    if not success or not info then return nil end
-    
-    for _, line in ipairs(info) do
-      if line:find("Current control signal (binary): 0b") then
-        return line:match("Current control signal %(binary%): 0b(%w+)")
+function t7controller:new(
+  inertGasTransposerAddress,
+  superConductorTransposerAddress,
+  netroniumTransposerAddress,
+  coolantTransposerAddress)
+
+  local obj = {}
+
+  obj.inertGasTransposerProxy = nil
+  obj.superConductorTransposerProxy = nil
+  obj.netroniumTransposerProxy = nil
+  obj.coolantTransposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.transposerLiquids = {}
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.superconductorCount = 1440
+  obj.neutroniumCount = 4608
+  obj.supercoolantCount = 10000
+
+  function obj:init()
+    self:findMachineProxy()
+
+    self:findTransposerFluid(self.inertGasTransposerProxy, {"helium", "neon", "krypton", "xenon"})
+    self:findTransposerFluid(self.superConductorTransposerProxy, {"superconductor"})
+    self:findTransposerFluid(self.netroniumTransposerProxy, {"neutronium"})
+    self:findTransposerFluid(self.coolantTransposerProxy, {"supercoolant"})
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.update = function()
+      if self.gtSensorParser:getNumber(2, "Success chance:") == 100 then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      elseif self.controllerProxy.hasWork() then
+        self.stateMachine:setState(self.stateMachine.states.work)
       end
     end
-    return nil
+
+    self.stateMachine.states.work = self.stateMachine:createState("Work")
+    self.stateMachine.states.work.init = function()
+      local bitString = self.gtSensorParser:getString(4, "Current control signal (binary): 0b")
+
+      if bitString == nil then
+        bitString = "0000"
+      end
+
+      local bits = self:bitParser(bitString)
+
+      if bits[1] == false and bits[2] == false and bits[3] == false and bits[4] == false then
+        self:putCoolant()
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      if bits[4] == true then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      if bits[1] == true then
+        self:putInertGas(bits)
+      end
+
+      if bits[2] == true then
+        self:putSuperConductor()
+      end
+
+      if bits[3] == true then
+        self:putNeutronium()
+      end
+
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
   end
 
-  local function bitParser(bitString)
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitdegasifier")
+
+    if self.controllerProxy == nil then
+      error("[T7] Residual Decontaminant Degasser Purification Unit not found")
+    end
+
+    self.inertGasTransposerProxy = componentDiscoverLib.discoverProxy(
+      inertGasTransposerAddress,
+      "[T7] Inert Gas Transposer",
+      "transposer")
+    self.superConductorTransposerProxy = componentDiscoverLib.discoverProxy(
+      superConductorTransposerAddress,
+      "[T7] Super Conductor Transposer",
+      "transposer")
+    self.netroniumTransposerProxy = componentDiscoverLib.discoverProxy(
+      netroniumTransposerAddress,
+      "[T7] Netronium Transposer",
+      "transposer")
+    self.coolantTransposerProxy = componentDiscoverLib.discoverProxy(
+      coolantTransposerAddress,
+      "[T7] Coolant Transposer",
+      "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerFluid(proxy, fluidNames)
+    local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, fluidNames, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T7] Can't find liquid: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerLiquids[key] = value
+    end
+  end
+
+  function obj:bitParser(bitString)
     bitString = string.rep("0", 4 - #bitString)..bitString
+
     local bits = {
       tonumber(bitString:sub(4, 4)) == 1,
       tonumber(bitString:sub(3, 3)) == 1,
       tonumber(bitString:sub(2, 2)) == 1,
       tonumber(bitString:sub(1, 1)) == 1,
     }
+
     return bits
   end
 
-  function obj:init()
-    self.logger:info("Инициализация T7 Controller...")
-    
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
-      end
+  function obj:putInertGas(bits)
+    local inertGas = ""
+    local count = 0
+
+    if bits[2] == false and bits[3] == false then
+      inertGas = "helium"
+      count = 10000
+    elseif bits[2] == true and bits[3] == false then
+      inertGas = "neon"
+      count = 7500
+    elseif bits[2] == false and bits[3] == true then
+      inertGas = "krypton"
+      count = 5000
+    elseif bits[2] == true and bits[3] == true then
+      inertGas = "xenon"
+      count = 2500
     end
 
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
+    local _, result = self.inertGasTransposerProxy.transferFluid(
+      self.transposerLiquids[inertGas].side,
+      sides.up,
+      count,
+      self.transposerLiquids[inertGas].tank)
+
+    if result ~= count then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough "..inertGas.." for craft")
     end
-
-    -- Инициализация прокси транспозеров
-    local function getProxy(addr, name)
-      if addr and addr ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-        local success, proxy = pcall(component.proxy, addr)
-        if success then return proxy end
-        self.logger:warning("Не удалось подключить транспозер " .. name)
-      end
-      return nil
-    end
-
-    self.inertGasTransposer = getProxy(self.config.inertGasTransposerAddress, "Inert Gas")
-    self.superConductorTransposer = getProxy(self.config.superConductorTransposerAddress, "Super Conductor")
-    self.neutroniumTransposer = getProxy(self.config.netroniumTransposerAddress, "Neutronium")
-    self.coolantTransposer = getProxy(self.config.coolantTransposerAddress, "Coolant")
-
-    self.logger:info("Инициализация завершена. Начальное состояние: idle.")
-    
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-    stateMod.t7.status = "IDLE"
-    stateMod.t7.color = theme.C.text
-    
-    return true
   end
 
-  local function transferFluidOrItem(transposer, fluidNamePart, itemNamePart, amount)
-    if not transposer then return false, "no transposer" end
-    
-    -- 1. Сначала пытаемся как жидкость
-    local sidesWithFluid = {}
-    local emptyTanks = {}
-    
-    for side = 0, 5 do
-      local success, tanks = pcall(transposer.getFluidInTank, side)
-      if success and tanks then
-        local fluid = tanks[1]
-        if fluid and fluid.amount > 0 then
-          obj.logger:debug(string.format("T7: Сторона %d имеет жидкость %s (%s) объемом %d мб", side, tostring(fluid.name), tostring(fluid.label), fluid.amount))
-          if fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
-            table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
-          end
-        else
-          obj.logger:debug(string.format("T7: Сторона %d - пустой резервуар/люк", side))
-          table.insert(emptyTanks, side)
-        end
-      end
+  function obj:putSuperConductor()
+    local _, result = self.superConductorTransposerProxy.transferFluid(
+      self.transposerLiquids["superconductor"].side,
+      sides.up,
+      self.superconductorCount,
+      self.transposerLiquids["superconductor"].tank)
+
+    if result ~= self.superconductorCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough superconductor for craft")
     end
-    
-    local sourceSide = nil
-    local sinkCandidates = {}
-    
-    if #sidesWithFluid == 1 then
-      sourceSide = sidesWithFluid[1].side
-      for _, side in ipairs(emptyTanks) do
-        table.insert(sinkCandidates, side)
-      end
-    elseif #sidesWithFluid >= 2 then
-      table.sort(sidesWithFluid, function(a, b) return a.amount > b.amount end)
-      sourceSide = sidesWithFluid[1].side
-      table.insert(sinkCandidates, sidesWithFluid[#sidesWithFluid].side)
-      for _, side in ipairs(emptyTanks) do
-        table.insert(sinkCandidates, side)
-      end
-    end
-    
-    obj.logger:debug(string.format("T7: Источник=%s, Кандидаты-приемники: %s", tostring(sourceSide), table.concat(sinkCandidates, ", ")))
-    
-    if sourceSide then
-      for _, sinkSide in ipairs(sinkCandidates) do
-        obj.logger:debug(string.format("T7: Попытка transferFluid с %d на %d, кол-во: %d", sourceSide, sinkSide, amount))
-        local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
-        obj.logger:debug(string.format("T7: Результат transferFluid с %d на %d: ok=%s, transferred=%s", sourceSide, sinkSide, tostring(ok), tostring(transferred)))
-        if ok and transferred then
-          local amt = (type(transferred) == "number" and transferred) or amount
-          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-            return true, "fluid", amt
-          end
-        end
-      end
-    end
-    
-    -- 2. Если жидкость не сработала, пытаемся как предмет
-    local sidesWithItem = {}
-    local emptyInventories = {}
-    
-    for side = 0, 5 do
-      local success, size = pcall(transposer.getInventorySize, side)
-      if success and size and size > 0 then
-        local foundCount = 0
-        local foundSlot = nil
-        for slot = 1, size do
-          local succ2, stack = pcall(transposer.getStackInSlot, side, slot)
-          if succ2 and stack and stack.size > 0 and stack.name and (stack.name:lower():find(itemNamePart:lower()) or (stack.label and stack.label:lower():find(itemNamePart:lower()))) then
-            foundCount = foundCount + stack.size
-            if not foundSlot then foundSlot = slot end
-          end
-        end
-        
-        if foundCount > 0 then
-          table.insert(sidesWithItem, { side = side, slot = foundSlot, count = foundCount })
-        else
-          table.insert(emptyInventories, side)
-        end
-      end
-    end
-    
-    local itemSourceSide = nil
-    local sourceSlot = nil
-    local itemSinkCandidates = {}
-    
-    if #sidesWithItem == 1 then
-      itemSourceSide = sidesWithItem[1].side
-      sourceSlot = sidesWithItem[1].slot
-      for _, side in ipairs(emptyInventories) do
-        table.insert(itemSinkCandidates, side)
-      end
-    elseif #sidesWithItem >= 2 then
-      table.sort(sidesWithItem, function(a, b) return a.count > b.count end)
-      itemSourceSide = sidesWithItem[1].side
-      sourceSlot = sidesWithItem[1].slot
-      table.insert(itemSinkCandidates, sidesWithItem[#sidesWithItem].side)
-      for _, side in ipairs(emptyInventories) do
-        table.insert(itemSinkCandidates, side)
-      end
-    end
-    
-    if itemSourceSide and sourceSlot then
-      for _, itemSinkSide in ipairs(itemSinkCandidates) do
-        local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
-        if ok and transferred then
-          local amt = (type(transferred) == "number" and transferred) or amount
-          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-            return true, "item", amt
-          end
-        end
-      end
-    end
-    
-    return false, "not found"
   end
 
-  function obj:init()
-    self.logger:info("Инициализация T7 Controller...")
-    
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
-      end
+  function obj:putNeutronium()
+    local _, result = self.netroniumTransposerProxy.transferFluid(
+      self.transposerLiquids["neutronium"].side,
+      sides.up,
+      self.neutroniumCount,
+      self.transposerLiquids["neutronium"].tank)
+
+    if result ~= self.neutroniumCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough neutronium for craft")
     end
+  end
 
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
+  function obj:putCoolant()
+    local _, result = self.coolantTransposerProxy.transferFluid(
+      self.transposerLiquids["supercoolant"].side,
+      sides.up,
+      self.supercoolantCount,
+      self.transposerLiquids["supercoolant"].tank)
+
+    if result ~= self.supercoolantCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough coolant for craft")
     end
-
-    -- Инициализация прокси транспозеров
-    local function getProxy(addr, name)
-      if addr and addr ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-        local success, proxy = pcall(component.proxy, addr)
-        if success then return proxy end
-        self.logger:warning("Не удалось подключить транспозер " .. name)
-      end
-      return nil
-    end
-
-    self.inertGasTransposer = getProxy(self.config.inertGasTransposerAddress, "Inert Gas")
-    self.superConductorTransposer = getProxy(self.config.superConductorTransposerAddress, "Super Conductor")
-    self.neutroniumTransposer = getProxy(self.config.netroniumTransposerAddress, "Neutronium")
-    self.coolantTransposer = getProxy(self.config.coolantTransposerAddress, "Coolant")
-
-    self.logger:info("Инициализация завершена. Начальное состояние: idle.")
-    
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-    stateMod.t7.status = "IDLE"
-    stateMod.t7.color = theme.C.text
-    
-    return true
   end
 
   function obj:loop()
-    if not self.proxy then return end
-
-    local success, hasWork = pcall(self.proxy.hasWork)
-    if not success then return end
-
-    local bitString = getBitString()
-    self.logger:debug(string.format("Статус: %s, Работа: %s, Биты: %s", self.state, tostring(hasWork), tostring(bitString)))
-
-    local stateMod = require("lib.state")
-    local theme = require("lib.theme")
-
-    if self.state == "idle" then
-      if hasWork then
-        self.logger:info("Обнаружена работа. Переход в work.")
-        self.state = "work"
-        stateMod.t7.status = "WORKING"
-        stateMod.t7.color = theme.C.warn
-      end
-    elseif self.state == "work" then
-      if not bitString then
-        self.logger:warning("Не удалось получить битовую строку. Ждем.")
-        return
-      end
-
-      local bits = bitParser(bitString)
-      self.logger:info(string.format("Парсинг бит: [%s, %s, %s, %s]", tostring(bits[1]), tostring(bits[2]), tostring(bits[3]), tostring(bits[4])))
-
-      if bits[4] == true then
-        self.logger:info("Бит 4 активен. Пропуск. Переход в waitEnd.")
-        self.state = "waitEnd"
-        stateMod.t7.status = "WAITING"
-        stateMod.t7.color = theme.C.partial
-        return
-      end
-
-      local transferSuccess = true
-
-      if bits[1] == false and bits[2] == false and bits[3] == false then
-        self.logger:info("Все биты 0. Требуется Coolant.")
-        if self.coolantTransposer then
-          local ok, type, transferred = transferFluidOrItem(self.coolantTransposer, "coolant", "coolant", 1000)
-          if ok then
-            self.logger:info("Залит Coolant: " .. tostring(transferred) .. " mB")
-          else
-            self.logger:warning("Не удалось залить Coolant")
-            transferSuccess = false
-          end
-        else
-          self.logger:warning("Транспозер Coolant не подключен!")
-          transferSuccess = false
-        end
-      else
-        if bits[1] == true then
-          self.logger:info("Бит 1 активен. Требуется Inert Gas.")
-          if self.inertGasTransposer then
-            local ok, type, transferred = transferFluidOrItem(self.inertGasTransposer, "inert", "inert", 1000)
-            if ok then
-              self.logger:info("Залит Inert Gas: " .. tostring(transferred) .. " mB")
-            else
-              self.logger:warning("Не удалось залить Inert Gas")
-              transferSuccess = false
-            end
-          else
-            self.logger:warning("Транспозер Inert Gas не подключен!")
-            transferSuccess = false
-          end
-        end
-        if bits[2] == true then
-          self.logger:info("Бит 2 активен. Требуется Super Conductor.")
-          if self.superConductorTransposer then
-            local ok, type, transferred = transferFluidOrItem(self.superConductorTransposer, "conductor", "conductor", 1000)
-            if ok then
-              self.logger:info("Залит Super Conductor: " .. tostring(transferred) .. " mB")
-            else
-              self.logger:warning("Не удалось залить Super Conductor")
-              transferSuccess = false
-            end
-          else
-            self.logger:warning("Транспозер Super Conductor не подключен!")
-            transferSuccess = false
-          end
-        end
-        if bits[3] == true then
-          self.logger:info("Бит 3 активен. Требуется Neutronium.")
-          if self.neutroniumTransposer then
-            local ok, type, transferred = transferFluidOrItem(self.neutroniumTransposer, "neutronium", "neutronium", 1000)
-            if ok then
-              self.logger:info("Залит Neutronium: " .. tostring(transferred) .. " mB")
-            else
-              self.logger:warning("Не удалось залить Neutronium")
-              transferSuccess = false
-            end
-          else
-            self.logger:warning("Транспозер Neutronium не подключен!")
-            transferSuccess = false
-          end
-        end
-      end
-
-      if transferSuccess then
-        self.logger:info("Все требуемые ресурсы залиты. Переход в waitEnd.")
-        self.state = "waitEnd"
-        stateMod.t7.status = "WAITING"
-        stateMod.t7.color = theme.C.partial
-      end
-    elseif self.state == "waitEnd" then
-      self.logger:info("Ожидание события cycle_end...")
-      local ev, arg = event.pull(10, "cycle_end")
-      if ev then
-        self.logger:info("Получено событие cycle_end. Возврат в idle.")
-        self.state = "idle"
-        stateMod.t7.status = "IDLE"
-        stateMod.t7.color = theme.C.text
-      else
-        self.logger:warning("Таймаут ожидания cycle_end. Проверяем работу машины.")
-        if not hasWork then
-          self.logger:info("Машина не работает. Возврат в idle.")
-          self.state = "idle"
-          stateMod.t7.status = "IDLE"
-          stateMod.t7.color = theme.C.text
-        end
-      end
-    end
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
   end
 
   function obj:getState()
-    return string.format("State: [%s]", self.state)
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
   end
 
+  setmetatable(obj, self)
+  self.__index = self
   return obj
 end
 

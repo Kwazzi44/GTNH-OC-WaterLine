@@ -1,20 +1,20 @@
 local config = {
-  enableAutoUpdate = false, -- Выключим автообновление в нашей кастомной версии
+  enableAutoUpdate = false, -- Disable auto-update to avoid overwriting custom changes
 
-  -- Настройки логирования
+  -- Logging settings
   logger = {
-    level = "debug", -- debug, info, warning, error
-    file = "parallel_logs.log",
-    printToScreen = true, -- Выводить логи на экран для отладки инициализации
+    level = "info", -- debug, info, warning, error
+    file = "waterline_logs.log",
+    printToScreen = false,
   },
 
-  -- Контроллер главной линии
+  -- Main line controller settings
   lineController = {
     machineName = "multimachine.purificationplant",
-    pollInterval = 1, -- Интервал опроса в секундах
+    pollInterval = 1,
   },
 
-  -- Контроллеры тиров
+  -- Tier controllers settings
   controllers = {
     t3 = {
       enable = false,

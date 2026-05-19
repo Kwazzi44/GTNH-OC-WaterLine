@@ -1,86 +1,63 @@
-local component = require("component")
 local event = require("event")
+local componentDiscoverLib = require("lib.component-discover-lib")
 
 local lineController = {}
 
-function lineController:new(config, logger)
+function lineController:newFormConfig()
+  return self:new()
+end
+
+function lineController:new()
   local obj = {}
-  obj.config = config
-  obj.logger = logger
-  obj.proxy = nil
+
+  obj.controllerProxy = nil
   local lastWorkProgress = 0
 
   function obj:init()
-    self.logger:info("Инициализация Line Controller...")
-    
-    if self.config.machineAddress and self.config.machineAddress ~= "" then
-      local proxy = component.proxy(self.config.machineAddress)
-      if proxy then
-        self.proxy = proxy
-        self.logger:info("Машина найдена по адресу из реестра: " .. self.config.machineAddress)
-        return true
-      else
-        self.logger:warning("Машина с адресом " .. self.config.machineAddress .. " из реестра не найдена. Пытаемся найти по имени.")
-      end
-    end
+    self:findMachineProxy()
+  end
 
-    -- Ищем компонент типа gt_machine и сверяем имя через getName()
-    for address, name in component.list("gt_machine") do
-      local proxy = component.proxy(address)
-      if proxy and proxy.getName() == self.config.machineName then
-        self.proxy = proxy
-        break
-      end
-    end
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationplant")
 
-    if not self.proxy then
-      self.logger:error("Машина " .. self.config.machineName .. " не найдена!")
-      return false
+    if self.controllerProxy == nil then
+      error("[Line] Water Purification Plant not found")
     end
-
-    self.logger:info("Машина " .. self.config.machineName .. " найдена.")
-    return true
   end
 
   function obj:loop()
-    if not self.proxy then return end
+    local workProgress = self.controllerProxy.getWorkProgress()
 
-    local success, hasWork = pcall(self.proxy.hasWork)
-    local success2, workProgress = pcall(self.proxy.getWorkProgress)
-
-    if not success or not success2 then
-      self.logger:warning("Ошибка связи с машиной. Возможно, она отключена.")
-      return
-    end
-
-    if lastWorkProgress > workProgress or (hasWork == false and lastWorkProgress ~= 0) then
-      self.logger:info("Обнаружен конец цикла. Отправка события cycle_end.")
+    if lastWorkProgress > workProgress or (self.controllerProxy.hasWork() == false and lastWorkProgress ~= 0) then
       event.push("cycle_end")
       lastWorkProgress = 0
     end
 
-    if hasWork then
+    if self.controllerProxy.hasWork() then 
       lastWorkProgress = workProgress
     end
   end
 
   function obj:getState()
-    if not self.proxy then return "nil" end
-    
-    local success, hasWork = pcall(self.proxy.hasWork)
-    if not success then return "error" end
+    if self.controllerProxy == nil then
+      return "nil"
+    end
 
-    if hasWork then
-      local success2, progress = pcall(self.proxy.getWorkProgress)
-      local success3, maxProgress = pcall(self.proxy.getWorkMaxProgress)
-      if success2 and success3 then
-        return string.format("%d/%d", math.ceil(progress/20), math.ceil(maxProgress/20))
-      end
+    if self.controllerProxy.hasWork() then
+      return tostring(math.ceil(self.controllerProxy.getWorkProgress() / 20)).."/"..tostring(math.ceil(self.controllerProxy.getWorkMaxProgress()/20))
     end
 
     return "Disable"
   end
 
+  function obj:disable()
+    if self.controllerProxy ~= nil then
+      self.controllerProxy.setWorkAllowed(false)
+    end
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
   return obj
 end
 

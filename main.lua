@@ -1,114 +1,88 @@
-package.path = "/home/?.lua;/home/?/init.lua;" .. package.path
-
-local thread = require("thread")
-local event = require("event")
-local keyboard = require("keyboard")
-
--- Добавим вывод в консоль для отладки "зависаний" при старте
-print("Загрузка конфигурации...")
-package.loaded.config = nil -- Очистим кеш на случай перезапуска
+-- main.lua
+package.loaded.config = nil
 local config = require("config")
+local registry = require("registry")
 
--- Попробуем загрузить реестр и объединить его с конфигурацией
-local filesystem = pcall(require, "filesystem") and require("filesystem")
-if filesystem then
-  local registryPath = "/home/registry.lua"
-  if filesystem.exists(registryPath) then
-    local ok, reg = pcall(loadfile(registryPath))
-    if ok and type(reg) == "table" then
-      -- Объединяем lineController
-      if reg.lineController then
-        if reg.lineController.machineAddress then
-          config.lineController.machineAddress = reg.lineController.machineAddress
+-- Load registry bindings and merge into config
+local regData = registry.load()
+if regData.lineController then
+  if regData.lineController.machineAddress then
+    config.lineController.machineAddress = regData.lineController.machineAddress
+  end
+end
+if regData.controllers then
+  for tier, regConf in pairs(regData.controllers) do
+    if config.controllers[tier] then
+      local c = config.controllers[tier]
+      local hasAnyAddress = false
+      for k, v in pairs(regConf) do
+        if v and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+          c[k] = v
+          hasAnyAddress = true
         end
       end
-      -- Объединяем controllers
-      if reg.controllers then
-        for tier, regData in pairs(reg.controllers) do
-          if config.controllers[tier] then
-            local c = config.controllers[tier]
-            local hasAnyAddress = false
-            for k, v in pairs(regData) do
-              if v and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
-                c[k] = v
-                hasAnyAddress = true
-              end
-            end
-            if hasAnyAddress then
-              c.enable = true
-            end
-          end
-        end
+      if hasAnyAddress then
+        c.enable = true
       end
     end
   end
 end
 
+local event = require("event")
+local keyboard = require("keyboard")
+local computer = require("computer")
+local component = require("component")
 
--- Инициализация логгера
-print("Инициализация логгера...")
 local loggerLib = require("lib.logger")
-local mainLogger = loggerLib:new(config.logger, "[Main]")
+local mainLogger = loggerLib:new(config.logger, "Main")
 
-mainLogger:info("Программа запускается...")
+mainLogger:info("Starting Water Line Control (Original Controllers Mode)...")
 
--- Загрузка контроллеров
-mainLogger:info("Загрузка библиотек контроллеров...")
 local lineControllerLib = require("src.line-controller")
-local lineController = lineControllerLib:new(config.lineController, loggerLib:new(config.logger, "[Line]"))
+local lineController = lineControllerLib:newFormConfig()
 
-local controllers = {}
-local threads = {}
+local activeControllers = {}
 
--- Инициализация Line Controller
-mainLogger:info("Инициализация Line Controller...")
-if lineController:init() then
-  mainLogger:info("Запуск потока для Line Controller...")
-  local t = thread.create(function()
-    while true do
-      lineController:loop()
-      os.sleep(config.lineController.pollInterval or 1)
-    end
-  end)
-  t:detach()
-  table.insert(threads, t)
+-- Initialize WPP Line Controller
+if pcall(function() lineController:init() end) then
+  mainLogger:info("WPP Line Controller initialized successfully.")
 else
-  mainLogger:error("Не удалось инициализировать Line Controller. Выход.")
+  mainLogger:error("Failed to initialize WPP Line Controller. Exiting.")
   os.exit(1)
 end
 
--- Инициализация и запуск контроллеров тиров
-mainLogger:info("Поиск и инициализация контроллеров тиров...")
+-- Initialize T3-T8 controllers
 for key, controllerConfig in pairs(config.controllers) do
   if controllerConfig.enable then
-    mainLogger:info("Включен контроллер " .. key .. ". Загрузка...")
-    
+    mainLogger:info("Initializing controller: " .. key:upper())
     local success, lib = pcall(require, "src." .. key .. "-controller")
     if success then
-      local ctrlLogger = loggerLib:new(config.logger, "[" .. key:upper() .. "]")
-      local ctrl = lib:new(controllerConfig, ctrlLogger)
-      
-      if ctrl:init() then
-        mainLogger:info("Запуск потока для " .. key .. "...")
-        local t = thread.create(function()
-          while true do
-            ctrl:loop()
-            os.sleep(controllerConfig.pollInterval or 0.5)
-          end
-        end)
-        t:detach()
-        table.insert(threads, t)
-        controllers[key] = ctrl
+      local ok, ctrl = pcall(function() return lib:newFormConfig(controllerConfig) end)
+      if ok and ctrl then
+        local initOk, err = pcall(function() ctrl:init() end)
+        if initOk then
+          activeControllers[key] = {
+            ctrl = ctrl,
+            pollInterval = controllerConfig.pollInterval or 0.5,
+            lastPoll = 0
+          }
+        else
+          mainLogger:warning("Failed to init controller " .. key:upper() .. ": " .. tostring(err))
+        end
       else
-        mainLogger:warning("Не удалось инициализировать контроллер " .. key)
+        mainLogger:warning("Failed to instantiate controller " .. key:upper() .. ": " .. tostring(ctrl))
       end
     else
-      mainLogger:warning("Не удалось загрузить файл src/" .. key .. "-controller.lua")
+      mainLogger:warning("Failed to load controller src/" .. key .. "-controller.lua: " .. tostring(lib))
+    end
+  else
+    local state = require("lib.state")
+    if state[key] then
+      state[key].status = "DISABLED"
+      state[key].color = 0x586E75
     end
   end
 end
-
-mainLogger:info("Все потоки запущены. Инициализация GUI...")
 
 local gui = require("lib.gui")
 local state = require("lib.state")
@@ -116,76 +90,128 @@ local logViewer = require("lib.log_viewer")
 
 gui.init()
 gui.drawLayout()
-config.logger.printToScreen = false
 
--- Ожидание выхода и обновление экрана
-while true do
-  local ev, _, _, keyCode = event.pull(0.5, "key_up")
-  
+-- Setup event listeners for log events pushed by original controllers
+local function onLogInfo(_, msg) mainLogger:info(msg) end
+local function onLogWarning(_, msg) mainLogger:warning(msg) end
+local function onLogError(_, msg) mainLogger:error(msg) end
+
+event.listen("log_info", onLogInfo)
+event.listen("log_warning", onLogWarning)
+event.listen("log_error", onLogError)
+
+local lineInterval = config.lineController.pollInterval or 1
+local lastLinePoll = 0
+local lastRedraw = 0
+local quitFlag = false
+
+while not quitFlag do
+  local now = computer.uptime()
+
+  -- 1. Poll WPP Line Controller
+  if now - lastLinePoll >= lineInterval then
+    pcall(function() lineController:loop() end)
+    lastLinePoll = now
+  end
+
+  -- 2. Poll T3-T8 Controllers
+  for key, item in pairs(activeControllers) do
+    if now - item.lastPoll >= item.pollInterval then
+      pcall(function() item.ctrl:loop() end)
+      item.lastPoll = now
+    end
+  end
+
+  -- 3. Redraw dashboard periodically and update telemetry statuses
+  if now - lastRedraw >= 1 then
+    for key, item in pairs(activeControllers) do
+      local stateName = "IDLE"
+      local color = 0x839496 -- Theme C.text
+      local ctrl = item.ctrl
+      
+      if ctrl.controllerProxy then
+        local workAllowed = true
+        pcall(function() workAllowed = ctrl.controllerProxy.isWorkAllowed() end)
+        
+        local hasWork = false
+        pcall(function() hasWork = ctrl.controllerProxy.hasWork() end)
+        
+        if not workAllowed then
+          stateName = "DISABLED"
+          color = 0x586E75 -- C.partial
+        elseif not hasWork then
+          stateName = "WAITING"
+          color = 0x2AA198 -- C.partial
+        elseif ctrl.stateMachine and ctrl.stateMachine.currentState then
+          local name = ctrl.stateMachine.currentState.name or "WORK"
+          stateName = name:upper()
+          if stateName == "IDLE" then
+            color = 0x839496 -- C.text
+          elseif stateName:find("WAIT") then
+            color = 0x268BD2 -- C.partial
+          else
+            color = 0xCB4B16 -- C.warn
+          end
+        end
+      end
+      
+      if state[key] then
+        state[key].status = stateName
+        state[key].color = color
+      end
+    end
+    
+    gui.drawLayout()
+    lastRedraw = now
+  end
+
+  -- 4. Yield / Poll for keyboard events (non-blocking)
+  local ev, _, _, keyCode = event.pull(0.1, "key_up")
   if ev == "key_up" then
     if keyCode == keyboard.keys.q then
-      -- Восстанавливаем цвета терминала перед выходом
-      local comp = require("component")
-      if comp.gpu then
-        comp.gpu.setBackground(0x000000)
-        comp.gpu.setForeground(0xFFFFFF)
-        require("term").clear()
-      end
-      
-      mainLogger:info("Получен сигнал выхода (Q). Останавливаем потоки...")
-      for _, t in ipairs(threads) do
-        pcall(t.kill, t)
-      end
-      break
+      quitFlag = true
     elseif keyCode == keyboard.keys.f1 then
-      -- Запуск Setup
-      local comp = require("component")
-      if comp.gpu then
-        comp.gpu.setBackground(0x000000)
-        comp.gpu.setForeground(0xFFFFFF)
+      -- Unregister listener and run setup
+      event.ignore("log_info", onLogInfo)
+      event.ignore("log_warning", onLogWarning)
+      event.ignore("log_error", onLogError)
+      if component.gpu then
+        component.gpu.setBackground(0x000000)
+        component.gpu.setForeground(0xFFFFFF)
         require("term").clear()
       end
-      
-      print("Запуск мастера настройки...")
+      print("Starting setup utility...")
       os.sleep(1)
-      os.execute("lua /home/setup.lua")
+      os.execute("lua setup.lua")
       
-      -- После выхода из setup перерисовываем GUI
-      gui.init()
-      gui.drawLayout()
+      -- Reboot the app after exiting setup
+      os.execute("lua main.lua")
+      break
     elseif keyCode == keyboard.keys.f3 then
       gui.init()
       gui.drawLayout()
     elseif keyCode == keyboard.keys.f4 then
-      -- Открываем встроенный GUI для просмотра логов
+      event.ignore("log_info", onLogInfo)
+      event.ignore("log_warning", onLogWarning)
+      event.ignore("log_error", onLogError)
       logViewer.show(config)
-      
-      -- После выхода из просмотрщика перерисовываем GUI
+      event.listen("log_info", onLogInfo)
+      event.listen("log_warning", onLogWarning)
+      event.listen("log_error", onLogError)
       gui.init()
       gui.drawLayout()
-    elseif keyCode == keyboard.keys.f5 then
-      -- Запуск обновления
-      local comp = require("component")
-      if comp.gpu then
-        comp.gpu.setBackground(0x000000)
-        comp.gpu.setForeground(0xFFFFFF)
-        require("term").clear()
-      end
-      
-      print("Запуск обновления программы...")
-      for _, t in ipairs(threads) do
-        pcall(t.kill, t)
-      end
-      
-      os.execute("lua /home/update.lua")
-      break -- Выходим из программы
     end
-  end
-  
-  -- Обновляем карточки из state
-  for tier, data in pairs(state) do
-    gui.updateCardStatus(tier, data.status, data.color)
   end
 end
 
-mainLogger:info("Программа успешно завершена.")
+-- Cleanup before exit
+event.ignore("log_info", onLogInfo)
+event.ignore("log_warning", onLogWarning)
+event.ignore("log_error", onLogError)
+
+if component.gpu then
+  component.gpu.setBackground(0x000000)
+  component.gpu.setForeground(0xFFFFFF)
+  require("term").clear()
+end
+mainLogger:info("Water Line Control stopped.")
