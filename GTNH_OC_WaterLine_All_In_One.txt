@@ -1,0 +1,3260 @@
+================================================================================
+FILE: config.lua
+================================================================================
+local config = {
+  enableAutoUpdate = false, -- Disable auto-update to avoid overwriting custom changes
+
+  -- Logging settings
+  logger = {
+    level = "info", -- debug, info, warning, error
+    file = "waterline_logs.log",
+    printToScreen = false,
+  },
+
+  -- Main line controller settings
+  lineController = {
+    machineName = "multimachine.purificationplant",
+    pollInterval = 1,
+  },
+
+  -- Tier controllers settings
+  controllers = {
+    t3 = {
+      enable = false,
+      machineName = "multimachine.purificationunitflocculator",
+      transposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      requiredCount = 900000,
+      pollInterval = 0.5,
+    },
+    t4 = {
+      enable = false,
+      machineName = "multimachine.purificationunitphadjustment",
+      hydrochloricAcidTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      sodiumHydroxideTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      pollInterval = 0.5,
+    },
+    t5 = {
+      enable = false,
+      machineName = "multimachine.purificationunitplasmaheater",
+      plasmaTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      coolantTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      coolantCount = 2000,
+      plasmaCount = 100,
+      pollInterval = 0.5,
+    },
+    t6 = {
+      enable = false,
+      machineName = "multimachine.purificationunituvtreatment",
+      transposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      pollInterval = 0.5,
+    },
+    t7 = {
+      enable = false,
+      machineName = "multimachine.purificationunitdegasser",
+      inertGasTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      superConductorTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      netroniumTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      coolantTransposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      pollInterval = 0.5,
+    },
+    t8 = {
+      enable = false,
+      machineName = "multimachine.purificationunitextractor",
+      maxQuarkCount = 4,
+      transposerAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      subMeInterfaceAddress = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      pollInterval = 0.5,
+    }
+  }
+}
+
+return config
+
+
+
+================================================================================
+FILE: registry.lua
+================================================================================
+local filesystem = require("filesystem")
+local registry = {}
+
+local registryPath = "/home/registry_data.lua"
+local oldRegistryPath = "/home/registry.lua"
+
+function registry.load()
+  local data = nil
+
+  -- 1. Try to load from the new path
+  if filesystem.exists(registryPath) then
+    local ok, res = pcall(function()
+      local f = loadfile(registryPath)
+      if f then return f() end
+    end)
+    if ok and type(res) == "table" and not res.load and not res.save then
+      data = res
+    end
+  end
+
+  -- 2. If new path not found/invalid, try migrating from the old path
+  if not data and filesystem.exists(oldRegistryPath) then
+    local ok, res = pcall(function()
+      local f = loadfile(oldRegistryPath)
+      if f then return f() end
+    end)
+    -- Verify this is the actual raw config table (not the registry module code)
+    if ok and type(res) == "table" and not res.load and not res.save then
+      data = res
+      -- Auto-migrate to the new path immediately
+      registry.save(data)
+    end
+  end
+  
+  -- 3. Fallback to default structure
+  if not data then
+    data = {
+      lineController = { machineAddress = nil },
+      controllers = {}
+    }
+    for i = 3, 8 do
+      data.controllers["t" .. i] = { enable = false }
+    end
+  end
+
+  -- Ensure all properties exist
+  if not data.lineController then data.lineController = {} end
+  if not data.controllers then data.controllers = {} end
+  for i = 3, 8 do
+    local tkey = "t" .. i
+    if not data.controllers[tkey] then data.controllers[tkey] = {} end
+  end
+
+  return data
+end
+
+function registry.save(reg)
+  local f = io.open(registryPath, "w")
+  if f then
+    f:write("return {\n")
+    f:write("  lineController = {\n")
+    f:write(string.format("    machineAddress = %s,\n", reg.lineController.machineAddress and string.format("%q", reg.lineController.machineAddress) or "nil"))
+    f:write("  },\n")
+    f:write("  controllers = {\n")
+    for i = 3, 8 do
+      local tkey = "t" .. i
+      local tdata = reg.controllers[tkey] or {}
+      f:write(string.format("    %s = {\n", tkey))
+      f:write(string.format("      enable = %s,\n", tostring(tdata.enable == true)))
+      for k, v in pairs(tdata) do
+        if k ~= "enable" then
+          f:write(string.format("      %s = %s,\n", k, v and string.format("%q", v) or "nil"))
+        end
+      end
+      f:write("    },\n")
+    end
+    f:write("  }\n")
+    f:write("}\n")
+    f:close()
+    return true
+  end
+  return false
+end
+
+return registry
+
+
+
+
+================================================================================
+FILE: main.lua
+================================================================================
+-- main.lua
+package.loaded.config = nil
+local config = require("config")
+local registry = require("registry")
+
+-- Load registry bindings and merge into config
+local regData = registry.load()
+if regData.lineController then
+  if regData.lineController.machineAddress then
+    config.lineController.machineAddress = regData.lineController.machineAddress
+  end
+end
+if regData.controllers then
+  for tier, regConf in pairs(regData.controllers) do
+    if config.controllers[tier] then
+      local c = config.controllers[tier]
+      local hasAnyAddress = false
+      for k, v in pairs(regConf) do
+        if v and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+          c[k] = v
+          hasAnyAddress = true
+        end
+      end
+      if hasAnyAddress then
+        c.enable = true
+      end
+    end
+  end
+end
+
+local event = require("event")
+local keyboard = require("keyboard")
+local computer = require("computer")
+local component = require("component")
+
+local loggerLib = require("lib.logger")
+local mainLogger = loggerLib:new(config.logger, "Main")
+
+mainLogger:info("Starting Water Line Control (Original Controllers Mode)...")
+
+local lineControllerLib = require("src.line-controller")
+local lineController = lineControllerLib:newFormConfig()
+
+local activeControllers = {}
+
+-- Initialize WPP Line Controller
+if pcall(function() lineController:init() end) then
+  mainLogger:info("WPP Line Controller initialized successfully.")
+else
+  mainLogger:error("Failed to initialize WPP Line Controller. Exiting.")
+  os.exit(1)
+end
+
+-- Initialize T3-T8 controllers
+for key, controllerConfig in pairs(config.controllers) do
+  if controllerConfig.enable then
+    mainLogger:info("Initializing controller: " .. key:upper())
+    local success, lib = pcall(require, "src." .. key .. "-controller")
+    if success then
+      local ok, ctrl = pcall(function() return lib:newFormConfig(controllerConfig) end)
+      if ok and ctrl then
+        local initOk, err = pcall(function() ctrl:init() end)
+        if initOk then
+          activeControllers[key] = {
+            ctrl = ctrl,
+            pollInterval = controllerConfig.pollInterval or 0.5,
+            lastPoll = 0
+          }
+        else
+          mainLogger:warning("Failed to init controller " .. key:upper() .. ": " .. tostring(err))
+        end
+      else
+        mainLogger:warning("Failed to instantiate controller " .. key:upper() .. ": " .. tostring(ctrl))
+      end
+    else
+      mainLogger:warning("Failed to load controller src/" .. key .. "-controller.lua: " .. tostring(lib))
+    end
+  else
+    local state = require("lib.state")
+    if state[key] then
+      state[key].status = "DISABLED"
+      state[key].color = 0x586E75
+    end
+  end
+end
+
+local gui = require("lib.gui")
+local state = require("lib.state")
+local logViewer = require("lib.log_viewer")
+
+gui.init()
+gui.drawLayout()
+
+-- Setup event listeners for log events pushed by original controllers
+local function onLogInfo(_, msg) mainLogger:info(msg) end
+local function onLogWarning(_, msg) mainLogger:warning(msg) end
+local function onLogError(_, msg) mainLogger:error(msg) end
+
+event.listen("log_info", onLogInfo)
+event.listen("log_warning", onLogWarning)
+event.listen("log_error", onLogError)
+
+local lineInterval = config.lineController.pollInterval or 1
+local lastLinePoll = 0
+local lastRedraw = 0
+local quitFlag = false
+
+while not quitFlag do
+  local now = computer.uptime()
+
+  -- 1. Poll WPP Line Controller
+  if now - lastLinePoll >= lineInterval then
+    pcall(function() lineController:loop() end)
+    lastLinePoll = now
+  end
+
+  -- 2. Poll T3-T8 Controllers
+  for key, item in pairs(activeControllers) do
+    if now - item.lastPoll >= item.pollInterval then
+      pcall(function() item.ctrl:loop() end)
+      item.lastPoll = now
+    end
+  end
+
+  -- 3. Redraw dashboard periodically and update telemetry statuses
+  if now - lastRedraw >= 1 then
+    for key, item in pairs(activeControllers) do
+      local stateName = "IDLE"
+      local color = 0x839496 -- Theme C.text
+      local ctrl = item.ctrl
+      
+      if ctrl.controllerProxy then
+        local workAllowed = true
+        pcall(function() workAllowed = ctrl.controllerProxy.isWorkAllowed() end)
+        
+        local hasWork = false
+        pcall(function() hasWork = ctrl.controllerProxy.hasWork() end)
+        
+        if not workAllowed then
+          stateName = "DISABLED"
+          color = 0x586E75 -- C.partial
+        elseif not hasWork then
+          stateName = "WAITING"
+          color = 0x2AA198 -- C.partial
+        elseif ctrl.stateMachine and ctrl.stateMachine.currentState then
+          local name = ctrl.stateMachine.currentState.name or "WORK"
+          stateName = name:upper()
+          if stateName == "IDLE" then
+            color = 0x839496 -- C.text
+          elseif stateName:find("WAIT") then
+            color = 0x268BD2 -- C.partial
+          else
+            color = 0xCB4B16 -- C.warn
+          end
+        end
+      end
+      
+      if state[key] then
+        state[key].status = stateName
+        state[key].color = color
+      end
+    end
+    
+    gui.drawLayout()
+    lastRedraw = now
+  end
+
+  -- 4. Yield / Poll for keyboard events (non-blocking)
+  local ev, _, _, keyCode = event.pull(0.1, "key_up")
+  if ev == "key_up" then
+    if keyCode == keyboard.keys.q then
+      quitFlag = true
+    elseif keyCode == keyboard.keys.f1 then
+      -- Unregister listener and run setup
+      event.ignore("log_info", onLogInfo)
+      event.ignore("log_warning", onLogWarning)
+      event.ignore("log_error", onLogError)
+      if component.gpu then
+        component.gpu.setBackground(0x000000)
+        component.gpu.setForeground(0xFFFFFF)
+        require("term").clear()
+      end
+      print("Starting setup utility...")
+      os.sleep(1)
+      os.execute("lua setup.lua")
+      
+      -- Reboot the app after exiting setup
+      os.execute("lua main.lua")
+      break
+    elseif keyCode == keyboard.keys.f3 then
+      gui.init()
+      gui.drawLayout()
+    elseif keyCode == keyboard.keys.f4 then
+      event.ignore("log_info", onLogInfo)
+      event.ignore("log_warning", onLogWarning)
+      event.ignore("log_error", onLogError)
+      logViewer.show(config)
+      event.listen("log_info", onLogInfo)
+      event.listen("log_warning", onLogWarning)
+      event.listen("log_error", onLogError)
+      gui.init()
+      gui.drawLayout()
+    end
+  end
+end
+
+-- Cleanup before exit
+event.ignore("log_info", onLogInfo)
+event.ignore("log_warning", onLogWarning)
+event.ignore("log_error", onLogError)
+
+if component.gpu then
+  component.gpu.setBackground(0x000000)
+  component.gpu.setForeground(0xFFFFFF)
+  require("term").clear()
+end
+mainLogger:info("Water Line Control stopped.")
+
+
+
+================================================================================
+FILE: setup.lua
+================================================================================
+-- setup.lua
+local component = require("component")
+local event = require("event")
+local keyboard = require("keyboard")
+local unicode = require("unicode")
+local theme = require("lib.theme")
+local registry = require("registry")
+
+local gpu = component.isAvailable("gpu") and component.gpu or nil
+if not gpu then io.write("GPU not found!\n"); return end
+
+theme.init(gpu)
+local W, H = theme.getRes()
+local C = theme.C
+
+local regData = registry.load()
+
+local LEFT_W = 24
+local RX = LEFT_W + 3
+
+local function gset(x, y, text, fg, bg) theme.gset(x, y, text, fg, bg) end
+local function gfill(x, y, w, h, ch, fg, bg) theme.gfill(x, y, w, h, ch, fg, bg) end
+local function pad(s, n) return theme.pad(s, n) end
+
+local function drawFrame()
+  gfill(1, 1, W, H, " ", C.text, C.bg)
+  theme.drawHeader("GTNH WATER LINE - SETUP", "Hardware Registration Wizard")
+  
+  -- Left border divider
+  for row = 4, H-3 do
+    gset(LEFT_W + 1, row, "|", C.border, C.bg)
+  end
+  gset(LEFT_W + 1, H-2, "+", C.border, C.bg)
+end
+
+local function drawFooter(keys)
+  theme.drawFooter(keys)
+end
+
+local function clearRight()
+  gfill(LEFT_W + 2, 4, W - LEFT_W - 2, H - 6, " ", C.text, C.bg)
+end
+
+local function drawMenu(items, sel)
+  gset(2, 5, "MENU", C.dim, C.bg)
+  gset(2, 6, string.rep("-", LEFT_W - 2), C.border, C.bg)
+  for i, item in ipairs(items) do
+    local y = 6 + i
+    if i == sel then
+      gfill(2, y, LEFT_W - 1, 1, " ", C.sel_fg, C.sel_bg)
+      gset(3, y, item.label, C.sel_fg, C.sel_bg)
+    else
+      gfill(2, y, LEFT_W - 1, 1, " ", C.text, C.bg)
+      gset(3, y, item.label, C.text, C.bg)
+    end
+  end
+end
+
+-- Scanning helpers
+local function scanMachinesAndTransposers()
+  local machines = {}
+  local transposers = {}
+  local interfaces = {}
+  
+  for addr, type in component.list() do
+    if type == "gt_machine" then
+      local proxy = component.proxy(addr)
+      if proxy then
+        local ok, name = pcall(proxy.getName)
+        if ok and name then
+          table.insert(machines, { address = addr, name = name })
+        end
+      end
+    elseif type == "transposer" then
+      table.insert(transposers, addr)
+    elseif type == "me_interface" then
+      table.insert(interfaces, addr)
+    end
+  end
+  return machines, transposers, interfaces
+end
+
+-- Interactive single item selector from list
+local function selectFromList(title, list, itemFormatter)
+  local sel = 1
+  local scroll = 1
+  local viewH = H - 10
+  
+  while true do
+    clearRight()
+    gset(RX, 4, "--- " .. title:upper() .. " ---", C.title, C.bg)
+    gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+    
+    if #list == 0 then
+      gset(RX, 7, "No compatible components found on network.", C.warn, C.bg)
+      gset(RX, 9, "Press Enter to return...", C.dim, C.bg)
+      drawFooter({{"B", "Back"}})
+      while true do
+        local _, _, _, code = event.pull("key_down")
+        if code == 28 or code == keyboard.keys.b or code == 1 or code == 14 then return nil end
+      end
+    end
+    
+    for i = 0, viewH - 1 do
+      local idx = scroll + i
+      local y = 7 + i
+      if idx <= #list then
+        local item = list[idx]
+        local label = itemFormatter(item, idx)
+        label = pad(label, W - LEFT_W - 6)
+        if idx == sel then
+          gfill(RX, y, W - LEFT_W - 4, 1, " ", C.sel_fg, C.sel_bg)
+          gset(RX, y, label, C.sel_fg, C.sel_bg)
+        else
+          gfill(RX, y, W - LEFT_W - 4, 1, " ", C.text, C.bg)
+          gset(RX, y, label, C.text, C.bg)
+        end
+      else
+        gfill(RX, y, W - LEFT_W - 4, 1, " ", C.text, C.bg)
+      end
+    end
+    
+    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Confirm"}, {"B", "Cancel"}})
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 200 then -- Up
+        if sel > 1 then
+          sel = sel - 1
+          if sel < scroll then scroll = sel end
+        end
+      elseif code == 208 then -- Down
+        if sel < #list then
+          sel = sel + 1
+          if sel >= scroll + viewH then scroll = sel - viewH + 1 end
+        end
+      elseif code == 28 then -- Enter
+        return list[sel]
+      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
+        return nil
+      end
+    end
+  end
+end
+
+-- Configure WPP Controller
+local function configureWPP()
+  clearRight()
+  gset(RX, 4, "--- CONFIGURE MAIN LINE (WPP) ---", C.title, C.bg)
+  gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+  
+  local current = regData.lineController.machineAddress or "Not bound (autodetect)"
+  gset(RX, 7, "Current WPP Address:", C.text, C.bg)
+  gset(RX, 8, current, current == "Not bound (autodetect)" and C.warn or C.ok, C.bg)
+  
+  gset(RX, 10, "1. Bind new WPP address from network", C.text, C.bg)
+  gset(RX, 11, "2. Reset to autodetect mode", C.text, C.bg)
+  gset(RX, 13, "Press [B] to return", C.dim, C.bg)
+  
+  drawFooter({{"1", "Bind WPP"}, {"2", "Reset"}, {"B", "Back"}})
+  
+  while true do
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 2 then -- '1'
+        local machines = scanMachinesAndTransposers()
+        
+        -- Filter out bound addresses except current WPP address
+        local currentVal = regData.lineController.machineAddress
+        local bound = {}
+        for tk, td in pairs(regData.controllers or {}) do
+          for k, v in pairs(td) do
+            if k ~= "enable" and type(v) == "string" and v ~= "" and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+              bound[v] = true
+            end
+          end
+        end
+        
+        local wppCandidates = {}
+        for _, m in ipairs(machines) do
+          if m.name == "multimachine.purificationplant" and (not bound[m.address] or m.address == currentVal) then
+            table.insert(wppCandidates, m)
+          end
+        end
+        local selected = selectFromList("Select WPP Machine", wppCandidates, function(item)
+          return string.format("%s... (%s)", item.address:sub(1, 12), item.name)
+        end)
+        if selected then
+          regData.lineController.machineAddress = selected.address
+          return true
+        end
+        return false
+      elseif code == 3 then -- '2'
+        regData.lineController.machineAddress = nil
+        return true
+      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
+        return false
+      end
+    end
+  end
+end
+
+-- Tiers Configuration Submenu
+local function configureTiers()
+  local tiers = {
+    { key = "t3", label = "T3 Flocculation", roles = { { key = "transposerAddress", name = "Polyaluminium Transposer" } } },
+    { key = "t4", label = "T4 pH Adjustment", roles = { { key = "hydrochloricAcidTransposerAddress", name = "HCl Acid Transposer" }, { key = "sodiumHydroxideTransposerAddress", name = "NaOH Dust Transposer" } } },
+    { key = "t5", label = "T5 Extreme Temp", roles = { { key = "plasmaTransposerAddress", name = "Helium Plasma Transposer" }, { key = "coolantTransposerAddress", name = "Super Coolant Transposer" } } },
+    { key = "t6", label = "T6 UV Treatment", roles = { { key = "transposerAddress", name = "Lens Transposer" } } },
+    { key = "t7", label = "T7 Degasser", roles = { { key = "inertGasTransposerAddress", name = "Inert Gas Transposer" }, { key = "superConductorTransposerAddress", name = "Supercond Transposer" }, { key = "netroniumTransposerAddress", name = "Neutronium Transposer" }, { key = "coolantTransposerAddress", name = "Super Coolant Transposer" } } },
+    { key = "t8", label = "T8 Subatomic Extr", roles = { { key = "transposerAddress", name = "Quark Transposer" }, { key = "subMeInterfaceAddress", name = "Sub-AE ME Interface", isInterface = true } } }
+  }
+  
+  local sel = 1
+  while true do
+    clearRight()
+    gset(RX, 4, "--- CONFIGURE WATER LINE TIERS ---", C.title, C.bg)
+    gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+    
+    for idx, t in ipairs(tiers) do
+      local y = 7 + (idx - 1) * 2
+      local treg = regData.controllers[t.key] or {}
+      local status = treg.enable and "[ENABLED]" or "[DISABLED]"
+      local scol = treg.enable and C.ok or C.dim
+      
+      local label = string.format("%d. %-20s %s", idx, t.label, status)
+      if idx == sel then
+        gfill(RX, y, W - LEFT_W - 4, 1, " ", C.sel_fg, C.sel_bg)
+        gset(RX, y, label, C.sel_fg, C.sel_bg)
+      else
+        gfill(RX, y, W - LEFT_W - 4, 1, " ", C.text, C.bg)
+        gset(RX, y, label, C.text, C.bg)
+        gset(RX + 22, y, status, scol, C.bg)
+      end
+    end
+    
+    gset(RX, H-5, "Press Enter to configure selected tier.", C.dim, C.bg)
+    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Configure"}, {"B", "Back"}})
+    
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 200 then -- Up
+        if sel > 1 then sel = sel - 1 end
+      elseif code == 208 then -- Down
+        if sel < #tiers then sel = sel + 1 end
+      elseif code == 28 then -- Enter
+        -- Configure selected tier
+        local tier = tiers[sel]
+        local exitTier = false
+        while not exitTier do
+          clearRight()
+          gset(RX, 4, "--- CONFIG: " .. tier.label:upper() .. " ---", C.title, C.bg)
+          gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+          
+          local treg = regData.controllers[tier.key] or {}
+          local enLabel = treg.enable and "Enabled: YES" or "Enabled: NO"
+          gset(RX, 7, "1. Toggle State: " .. enLabel, C.text, C.bg)
+          gset(RX + 17, 7, treg.enable and "YES" or "NO", treg.enable and C.ok or C.ring_down, C.bg)
+          
+          gset(RX, 9, "Transposers / Interfaces:", C.dim, C.bg)
+          local y = 10
+          for rIdx, role in ipairs(tier.roles) do
+            local addr = treg[role.key] or "Not configured"
+            local acol = (addr == "Not configured") and C.ring_down or C.ok
+            local rowLabel = string.format("   %d) %-25s: %s", rIdx + 1, role.name, addr:sub(1, 10) .. "...")
+            gset(RX, y, rowLabel, C.text, C.bg)
+            gset(RX + 3 + 27, y, addr:sub(1, 12), acol, C.bg)
+            y = y + 1
+          end
+          
+          gset(RX, H-5, "Press number to select or B to back.", C.dim, C.bg)
+          drawFooter({{"1", "Toggle State"}, {"2-9", "Bind Hardware"}, {"B", "Back"}})
+          
+          local ev2, _, _, code2 = event.pull("key_down")
+          if ev2 == "key_down" then
+            if code2 == 2 then -- '1'
+              treg.enable = not treg.enable
+              regData.controllers[tier.key] = treg
+            elseif code2 >= 3 and code2 <= 1 + #tier.roles + 1 then -- '2' - '9'
+              local rIdx = code2 - 2
+              local role = tier.roles[rIdx]
+              if role then
+                local _, transposers, interfaces = scanMachinesAndTransposers()
+                local rawList = role.isInterface and interfaces or transposers
+                
+                -- Filter out bound addresses, except for the current role value
+                local currentVal = treg[role.key]
+                local bound = {}
+                if regData.lineController.machineAddress then
+                  bound[regData.lineController.machineAddress] = true
+                end
+                for tk, td in pairs(regData.controllers or {}) do
+                  for k, v in pairs(td) do
+                    if k ~= "enable" and type(v) == "string" and v ~= "" and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+                      if v ~= currentVal then
+                        bound[v] = true
+                      end
+                    end
+                  end
+                end
+                
+                local list = {}
+                for _, addr in ipairs(rawList) do
+                  if not bound[addr] then
+                    table.insert(list, addr)
+                  end
+                end
+                
+                local selected = selectFromList("Select for " .. role.name, list, function(item) return item end)
+                if selected then
+                  treg[role.key] = selected
+                  regData.controllers[tier.key] = treg
+                end
+              end
+            elseif code2 == keyboard.keys.b or code2 == 14 or code2 == 1 then -- B / Backspace / Esc
+              exitTier = true
+            end
+          end
+        end
+      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
+        break
+      end
+    end
+  end
+end
+
+-- Show Registry Details
+local function showRegistry()
+  clearRight()
+  gset(RX, 4, "--- CONFIGURATION REGISTRY ---", C.title, C.bg)
+  gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+  
+  local y = 7
+  gset(RX, y, "WPP Address: " .. (regData.lineController.machineAddress or "AUTODETECT"), C.text, C.bg)
+  y = y + 2
+  
+  for i = 3, 8 do
+    local tkey = "t" .. i
+    local treg = regData.controllers[tkey] or {}
+    local status = treg.enable and "ENABLED" or "DISABLED"
+    local scol = treg.enable and C.ok or C.dim
+    gset(RX, y, string.format("T%d (%s):", i, status), C.title, C.bg)
+    gset(RX + 9, y, status, scol, C.bg)
+    y = y + 1
+    
+    local hasItems = false
+    for k, v in pairs(treg) do
+      if k ~= "enable" then
+        gset(RX, y, string.format("  %-16s: %s", k, tostring(v):sub(1, 15) .. "..."), C.text, C.bg)
+        y = y + 1
+        hasItems = true
+      end
+    end
+    if not hasItems then
+      gset(RX, y, "  (No transposers required/configured)", C.dim, C.bg)
+      y = y + 1
+    end
+    y = y + 1
+    if y >= H - 4 then break end
+  end
+  
+  gset(RX, H-3, "Press any key to return...", C.dim, C.bg)
+  drawFooter({{"Any Key", "Back"}})
+  event.pull("key_down")
+end
+
+local MENU_ITEMS = {
+  { label = "1. Main WPP Config", fn = configureWPP },
+  { label = "2. Configure Tiers", fn = configureTiers },
+  { label = "3. Show Registry  ", fn = showRegistry },
+  { label = "4. Save & Exit   ", fn = function() registry.save(regData); return "exit" end }
+}
+
+local function run()
+  drawFrame()
+  local sel = 1
+  
+  while true do
+    drawMenu(MENU_ITEMS, sel)
+    drawFooter({{"Up/Dn", "Move"}, {"Enter", "Select"}, {"B", "Cancel"}})
+    
+    local ev, _, _, code = event.pull("key_down")
+    if ev == "key_down" then
+      if code == 200 then -- Up
+        if sel > 1 then sel = sel - 1 end
+      elseif code == 208 then -- Down
+        if sel < #MENU_ITEMS then sel = sel + 1 end
+      elseif code == 28 then -- Enter
+        local res = MENU_ITEMS[sel].fn()
+        if res == "exit" then break end
+        drawFrame()
+      elseif code == keyboard.keys.b or code == 1 then -- B / Esc
+        break
+      end
+    end
+  end
+  
+  -- Restore screen
+  gpu.setBackground(0x000000)
+  gpu.setForeground(0xFFFFFF)
+  gpu.fill(1, 1, W, H, " ")
+end
+
+local ok, err = pcall(run)
+if not ok then
+  gpu.setBackground(0x000000)
+  gpu.setForeground(0xFF2244)
+  gpu.fill(1, 1, W, H, " ")
+  gpu.set(1, 1, "SETUP UTILITY CRASHED:")
+  gpu.set(1, 3, tostring(err))
+  gpu.set(1, H, "Press any key to exit...")
+  event.pull("key_down")
+end
+
+
+
+
+================================================================================
+FILE: update.lua
+================================================================================
+local REPO = "https://raw.githubusercontent.com/Kwazzi44/GTNH-OC-WaterLine/main"
+
+local component  = require("component")
+local filesystem = require("filesystem")
+local internet   = require("internet")
+local shell      = require("shell")
+
+if not component.isAvailable("internet") then
+  io.write("[ERROR] Internet Card not found!\n"); os.exit(1)
+end
+
+-- List of files to update (remote source, local destination)
+local FILES = {
+  { "/config.lua",                      "config.lua"                      },
+  { "/registry.lua",                    "registry.lua"                    },
+  { "/main.lua",                        "main.lua"                },
+  { "/lib/logger.lua",                  "lib/logger.lua"          },
+  { "/lib/theme.lua",                   "lib/theme.lua"           },
+  { "/lib/gui.lua",                     "lib/gui.lua"             },
+  { "/lib/state.lua",                   "lib/state.lua"           },
+  { "/lib/log_viewer.lua",              "lib/log_viewer.lua"      },
+  { "/lib/state-machine-lib.lua",       "lib/state-machine-lib.lua"       },
+  { "/lib/component-discover-lib.lua",  "lib/component-discover-lib.lua"  },
+  { "/lib/gt-sensor-parser.lua",        "lib/gt-sensor-parser.lua"        },
+  { "/lib/list-lib.lua",                "lib/list-lib.lua"                },
+  { "/src/line-controller.lua",         "src/line-controller.lua" },
+  { "/src/t3-controller.lua",           "src/t3-controller.lua"   },
+  { "/src/t4-controller.lua",           "src/t4-controller.lua"   },
+  { "/src/t5-controller.lua",           "src/t5-controller.lua"   },
+  { "/src/t6-controller.lua",           "src/t6-controller.lua"   },
+  { "/src/t7-controller.lua",           "src/t7-controller.lua"   },
+  { "/src/t8-controller.lua",           "src/t8-controller.lua"   },
+  { "/update.lua",                      "update.lua"              },
+  { "/setup.lua",                       "setup.lua"               },
+  { "/version.lua",                     "version.lua"             },
+}
+
+local function resolvePath(p)
+  if p:sub(1, 1) == "/" then
+    return p
+  else
+    local cwd = shell.getWorkingDirectory() or "/home"
+    if cwd:sub(-1) ~= "/" then
+      cwd = cwd .. "/"
+    end
+    return cwd .. p
+  end
+end
+
+local function mkdirs(dest)
+  local absDest = resolvePath(dest)
+  local dir = filesystem.path(absDest)
+  if dir:sub(-1) == "/" then
+    dir = dir:sub(1, -2)
+  end
+  if dir and dir ~= "" and dir ~= "." and not filesystem.exists(dir) then
+    filesystem.makeDirectory(dir)
+  end
+end
+
+local function download(url, dest)
+  local absDest = resolvePath(dest)
+  mkdirs(absDest)
+
+  -- Cache bust query param
+  local bust = "?v=" .. tostring(math.random(1000000, 9999999))
+  local ok, err = pcall(function()
+    local resp, rerr = internet.request(url .. bust)
+    if not resp then error(rerr or "connection failed") end
+    local f = assert(io.open(absDest, "w"))
+    for chunk in resp do f:write(chunk) end
+    f:close()
+    if type(resp.close) == "function" then
+      resp.close()
+    end
+  end)
+  return ok, err
+end
+
+io.write("\n==========================================\n")
+io.write("  GTNH Water Line Control — UPDATER       \n")
+io.write("==========================================\n")
+io.write("[NOTE] config.lua and registry.lua are NOT overwritten if they exist.\n\n")
+
+-- Migrate old configuration before starting the update process!
+local oldRegistryPath = resolvePath("registry.lua")
+local newRegistryPath = resolvePath("registry_data.lua")
+if filesystem.exists(oldRegistryPath) and not filesystem.exists(newRegistryPath) then
+  local ok, res = pcall(function()
+    local f = loadfile(oldRegistryPath)
+    if f then return f() end
+  end)
+  -- If it's a configuration table, copy it to the new path
+  if ok and type(res) == "table" and not res.load and not res.save then
+    local f = io.open(newRegistryPath, "w")
+    if f then
+      f:write("return {\n")
+      f:write("  lineController = {\n")
+      f:write(string.format("    machineAddress = %s,\n", res.lineController and res.lineController.machineAddress and string.format("%q", res.lineController.machineAddress) or "nil"))
+      f:write("  },\n")
+      f:write("  controllers = {\n")
+      for i = 3, 8 do
+        local tkey = "t" .. i
+        local tdata = res.controllers and res.controllers[tkey] or {}
+        f:write(string.format("    %s = {\n", tkey))
+        f:write(string.format("      enable = %s,\n", tostring(tdata.enable == true)))
+        for k, v in pairs(tdata) do
+          if k ~= "enable" then
+            f:write(string.format("      %s = %s,\n", k, v and string.format("%q", v) or "nil"))
+          end
+        end
+        f:write("    },\n")
+      end
+      f:write("  }\n")
+      f:write("}\n")
+      f:close()
+      io.write("[MIGRATED] Old registry settings migrated to registry_data.lua\n\n")
+    end
+  end
+end
+
+local ok_n, fail_n = 0, 0
+for _, e in ipairs(FILES) do
+  local src_path = e[1]
+  local dest_path = e[2]
+  local abs_dest = resolvePath(dest_path)
+  
+  -- Skip overwriting local configurations to avoid wiping user setup
+  if (src_path == "/config.lua") and filesystem.exists(abs_dest) then
+    io.write(string.format("  [SKIPPED] %-35s (File preserved)\n", dest_path))
+  else
+    io.write(string.format("  [..] %-35s", dest_path))
+    local ok, err = download(REPO .. src_path, dest_path)
+    if ok then
+      io.write("\r  [OK] " .. dest_path .. "   \n"); ok_n = ok_n + 1
+    else
+      io.write("\r  [!!] " .. dest_path .. "   \n")
+      io.write("       " .. tostring(err) .. "\n"); fail_n = fail_n + 1
+    end
+  end
+  os.sleep(0.1) -- Yield to let network connections close and avoid spamming the connection limit
+end
+
+io.write(string.format("\nDone: %d updated, %d failed\n", ok_n, fail_n))
+if fail_n == 0 then
+  io.write("\nUpdate complete! Run: lua main.lua\n\n")
+end
+
+
+
+
+================================================================================
+FILE: lib/logger.lua
+================================================================================
+local logger = {}
+local lineCount = 0
+local memoryLogs = {}
+local maxMemoryLogs = 50
+
+function logger.getMemoryLogs()
+  return memoryLogs
+end
+
+function logger:new(config, prefix)
+  local obj = {}
+  obj.config = config or { level = "debug", printToScreen = false, file = "waterline_logs.log" }
+  obj.prefix = prefix or ""
+
+  local levels = { debug = 1, info = 2, warning = 3, error = 4 }
+
+  local function log(level, message)
+    local configLevel = levels[obj.config.level] or 1
+    local messageLevel = levels[level] or 1
+
+    if messageLevel >= configLevel then
+      local time = os.date("%H:%M:%S")
+      local tag = obj.prefix ~= "" and obj.prefix or "System"
+      local formattedMessage = string.format("[%s] [%s] [%s] %s", time, level:upper(), tag, message)
+
+      -- Add to memory buffer for GUI
+      table.insert(memoryLogs, {
+        time = time,
+        level = level:upper(),
+        tag = tag,
+        message = message
+      })
+      if #memoryLogs > maxMemoryLogs then
+        table.remove(memoryLogs, 1)
+      end
+
+      if obj.config.printToScreen then
+        print(formattedMessage)
+      end
+
+      if obj.config.file then
+        lineCount = lineCount + 1
+        local mode = "a"
+        if lineCount >= 250 then
+          mode = "w" -- Overwrite when reaching 250 lines
+          lineCount = 1
+        end
+
+        local f = io.open(obj.config.file, mode)
+        if f then
+          f:write(formattedMessage .. "\n")
+          f:close()
+        end
+      end
+    end
+  end
+
+  function obj:debug(message) log("debug", message) end
+  function obj:info(message) log("info", message) end
+  function obj:warning(message) log("warning", message) end
+  function obj:error(message) log("error", message) end
+
+  return obj
+end
+
+return logger
+
+
+
+
+================================================================================
+FILE: lib/theme.lua
+================================================================================
+local theme = {}
+
+local gpu = nil
+local W, H = 80, 25
+
+theme.C = {
+  bg        = 0x002B36,
+  header_bg = 0x073642,
+  sel_bg    = 0x073642,
+  sel_fg    = 0x268BD2,
+  text      = 0x839496,
+  dim       = 0x586E75,
+  border    = 0x1D6680,
+  title     = 0x268BD2,
+  key       = 0xB58900,
+  key_bg    = 0x002B36,
+
+  ok        = 0x859900,
+  warn      = 0xB58900,
+  ring_down = 0xDC322F,
+  unknown   = 0x586E75,
+  partial   = 0x2AA198
+}
+
+function theme.init(custom_gpu)
+  gpu = custom_gpu
+  if gpu then
+    W, H = gpu.getResolution()
+  end
+end
+
+function theme.getRes()
+  return W, H
+end
+
+function theme.gset(x, y, text, fg, bg)
+  if not gpu then return end
+  if fg then gpu.setForeground(fg) end
+  if bg then gpu.setBackground(bg) end
+  gpu.set(x, y, text)
+end
+
+function theme.gfill(x, y, w, h, ch, fg, bg)
+  if not gpu then return end
+  if fg then gpu.setForeground(fg) end
+  if bg then gpu.setBackground(bg) end
+  gpu.fill(x, y, w, h, ch)
+end
+
+function theme.pad(s, n)
+  s = tostring(s)
+  local unicode = require("unicode")
+  local len = unicode.len(s)
+  if len > n then return unicode.sub(s, 1, n-1) .. "~" end
+  return s .. string.rep(" ", n - len)
+end
+
+function theme.drawHeader(title, subtitle)
+  if not gpu then return end
+  local C = theme.C
+
+  theme.gset(1, 1, "+" .. string.rep("-", W - 2) .. "+", C.border, C.bg)
+
+  theme.gset(1, 2, "|", C.border, C.bg)
+  local inner = W - 2
+  local tag = "==[ " .. title .. " ]"
+  local fill = string.rep("=", math.max(0, inner - #tag))
+  theme.gset(2, 2, tag .. fill, C.title, C.bg)
+  theme.gset(W, 2, "|", C.border, C.bg)
+
+  theme.gset(1, 3, "|", C.border, C.bg)
+  theme.gfill(2, 3, W - 2, 1, " ", C.dim, C.bg)
+  if subtitle then
+    theme.gset(3, 3, "STATUS: " .. subtitle, C.dim, C.bg)
+  end
+  theme.gset(W, 3, "|", C.border, C.bg)
+end
+
+function theme.drawFooter(keys)
+  if not gpu then return end
+  local C = theme.C
+  theme.gset(1, H-2, "+" .. string.rep("-", W-2) .. "+", C.border, C.bg)
+  theme.gfill(2, H-1, W-2, 1, " ", C.text, C.bg)
+  theme.gset(1, H-1, "|", C.border, C.bg)
+  
+  local x = 3
+  for _, k in ipairs(keys) do
+    if x >= W - 4 then break end
+    theme.gset(x, H-1, "[" .. k[1] .. "]", C.key, C.bg)
+    x = x + #k[1] + 3
+    theme.gset(x, H-1, k[2], C.text, C.bg)
+    x = x + #k[2] + 2
+  end
+  
+  theme.gset(W, H-1, "|", C.border, C.bg)
+  theme.gset(1, H, "+" .. string.rep("-", W-2) .. "+", C.border, C.bg)
+end
+
+return theme
+
+
+
+
+================================================================================
+FILE: lib/gui.lua
+================================================================================
+local theme = require("lib.theme")
+local state = require("lib.state")
+local component = require("component")
+local logger = require("lib.logger")
+
+local gui = {}
+local gpu = nil
+local W, H = 80, 25
+
+function gui.init()
+  gpu = component.gpu
+  theme.init(gpu)
+  W, H = theme.getRes()
+  
+  -- Clear screen with bg color
+  theme.gfill(1, 1, W, H, " ", theme.C.text, theme.C.bg)
+end
+
+local function makeProgressBar(pct, width)
+  local filled = math.floor((pct / 100) * width)
+  filled = math.max(0, math.min(width, filled))
+  return string.rep("=", filled) .. string.rep(".", width - filled)
+end
+
+function gui.drawLayout()
+  -- WPP Subtitle calculation
+  local subtitle = "LINE: DISABLED"
+  if state.line and state.line.status and state.line.status ~= "DISABLED" then
+    if state.line.status == "WORKING" and state.line.maxProgress and state.line.maxProgress > 0 then
+      local pct = math.floor(state.line.progress / state.line.maxProgress * 100)
+      local elapsed = math.ceil(state.line.progress / 20)
+      local total = math.ceil(state.line.maxProgress / 20)
+      local pbar = makeProgressBar(pct, 20)
+      subtitle = string.format("LINE: ACTIVE [%s] %d%% (%ds/%ds)", pbar, pct, elapsed, total)
+    else
+      subtitle = "LINE: " .. state.line.status
+    end
+  end
+
+  theme.drawHeader("WATER LINE CONTROL", subtitle)
+  
+  theme.drawFooter({
+    {"F1", "Setup"},
+    {"F3", "Redraw"},
+    {"F4", "Logs"},
+    {"Q", "Quit"},
+  })
+  
+  gui.drawTierCards()
+  gui.drawLogsBox()
+end
+
+function gui.drawTierCards()
+  local tiers = {"t3", "t4", "t5", "t6", "t7", "t8"}
+  local cardW = 24
+  local cardH = 5
+  
+  local startX = 3
+  local startY = 5
+  
+  for i, tier in ipairs(tiers) do
+    local col = (i - 1) % 3
+    local row = math.floor((i - 1) / 3)
+    
+    local x = startX + col * (cardW + 2)
+    local y = startY + row * (cardH + 2)
+    
+    local tierState = state[tier] or { status = "DISABLED", color = theme.C.dim }
+    gui.drawCard(x, y, cardW, cardH, tier:upper(), tierState.status, tierState.color)
+  end
+end
+
+function gui.drawCard(x, y, w, h, title, status, color)
+  -- Border
+  theme.gset(x, y, "+" .. string.rep("-", w - 2) .. "+", theme.C.border, theme.C.bg)
+  for i = 1, h - 2 do
+    theme.gset(x, y + i, "|", theme.C.border, theme.C.bg)
+    theme.gset(x + w - 1, y + i, "|", theme.C.border, theme.C.bg)
+    theme.gfill(x + 1, y + i, w - 2, 1, " ", theme.C.text, theme.C.bg)
+  end
+  theme.gset(x, y + h - 1, "+" .. string.rep("-", w - 2) .. "+", theme.C.border, theme.C.bg)
+  
+  -- Title
+  theme.gset(x + 2, y, "[ " .. title .. " ]", theme.C.title, theme.C.bg)
+  
+  -- Status
+  theme.gset(x + 2, y + 2, "Status: ", theme.C.text, theme.C.bg)
+  theme.gset(x + 10, y + 2, theme.pad(status, w - 12), color, theme.C.bg)
+end
+
+function gui.drawLogsBox()
+  local logsY = 17
+  local logsH = 5
+  
+  -- Draw border
+  theme.gset(1, logsY, "+" .. string.rep("-", W - 2) .. "+", theme.C.border, theme.C.bg)
+  theme.gset(3, logsY, "[ Live Logs ]", theme.C.title, theme.C.bg)
+  
+  for i = 1, logsH - 1 do
+    local ry = logsY + i
+    theme.gset(1, ry, "|", theme.C.border, theme.C.bg)
+    theme.gset(W, ry, "|", theme.C.border, theme.C.bg)
+    theme.gfill(2, ry, W - 2, 1, " ", theme.C.text, theme.C.bg)
+  end
+  
+  -- Render logs
+  local logList = logger.getMemoryLogs()
+  local showCount = logsH - 1 -- 4 lines
+  local startIdx = math.max(1, #logList - showCount + 1)
+  
+  for i = 0, showCount - 1 do
+    local logIdx = startIdx + i
+    local ry = logsY + 1 + i
+    if logList[logIdx] then
+      local log = logList[logIdx]
+      -- Color code based on log level
+      local col = theme.C.text
+      if log.level == "WARNING" then col = theme.C.warn
+      elseif log.level == "ERROR" then col = theme.C.ring_down
+      elseif log.level == "DEBUG" then col = theme.C.dim
+      end
+      
+      local lineStr = string.format("[%s] [%s] %s", log.time, log.tag, log.message)
+      theme.gset(3, ry, theme.pad(lineStr, W - 5), col, theme.C.bg)
+    end
+  end
+end
+
+return gui
+
+
+
+
+================================================================================
+FILE: lib/state.lua
+================================================================================
+local state = {
+  t3 = { status = "DISABLED", color = 0x586E75 },
+  t4 = { status = "DISABLED", color = 0x586E75 },
+  t5 = { status = "DISABLED", color = 0x586E75 },
+  t6 = { status = "DISABLED", color = 0x586E75 },
+  t7 = { status = "DISABLED", color = 0x586E75 },
+  t8 = { status = "DISABLED", color = 0x586E75 },
+  line = { status = "DISABLED", color = 0x586E75, progress = 0, maxProgress = 0 }
+}
+
+return state
+
+
+
+
+================================================================================
+FILE: lib/log_viewer.lua
+================================================================================
+local component = require("component")
+local event = require("event")
+local keyboard = require("keyboard")
+local theme = require("lib.theme")
+
+local logViewer = {}
+
+local function loadAndParseLogs(filePath, filterTag)
+  local logs = {}
+  local f = io.open(filePath, "r")
+  if not f then return logs end
+
+  for line in f:lines() do
+    line = line:gsub("[\r\n]", "")
+    if line ~= "" then
+      local time, level, tag, msg = line:match("^%[(%d%d:%d%d:%d%d)%]%s*%[(%w+)%]%s*%[(%w+)%]%s*(.*)$")
+      if time then
+        local matched = false
+        if filterTag == "ALL" then
+          matched = true
+        elseif filterTag == "MAIN" and tag == "Main" then
+          matched = true
+        elseif filterTag == "LINE" and tag == "Line" then
+          matched = true
+        elseif tag:upper() == filterTag:upper() then
+          matched = true
+        end
+
+        if matched then
+          table.insert(logs, {
+            time = time,
+            level = level,
+            tag = tag,
+            message = msg
+          })
+        end
+      else
+        if filterTag == "ALL" or filterTag == "MAIN" then
+          table.insert(logs, {
+            time = "",
+            level = "INFO",
+            tag = "System",
+            message = line
+          })
+        end
+      end
+    end
+  end
+  f:close()
+  return logs
+end
+
+function logViewer.show(config)
+  local gpu = component.gpu
+  if not gpu then return end
+  
+  local W, H = theme.getRes()
+  local filePath = config.logger.file or "parallel_logs.log"
+  
+  local filters = {"ALL", "MAIN", "LINE", "T3", "T4", "T5", "T6", "T7", "T8"}
+  local activeFilterIdx = 1
+  local scrollOffset = 0
+  
+  local startY = 7
+  local endY = H - 3
+  local height = endY - startY + 1
+  
+  local function drawScreen()
+    theme.gfill(1, 1, W, H, " ", theme.C.text, theme.C.bg)
+    theme.drawHeader("WATER LINE LOG VIEWER", "LOG ANALYSIS PANEL")
+    theme.drawFooter({
+      {"Left/Right", "Filter"},
+      {"Up/Down", "Scroll"},
+      {"B/Q", "Back to Hub"},
+    })
+    
+    -- Draw filter panel
+    theme.gset(3, 5, "Filter:", theme.C.text, theme.C.bg)
+    local x = 11
+    for i, filter in ipairs(filters) do
+      if i == activeFilterIdx then
+        theme.gset(x, 5, "[ " .. filter .. " ]", theme.C.sel_fg, theme.C.sel_bg)
+      else
+        theme.gset(x, 5, "  " .. filter .. "  ", theme.C.dim, theme.C.bg)
+      end
+      x = x + #filter + 4
+    end
+    
+    -- Load and filter logs
+    local filteredLogs = loadAndParseLogs(filePath, filters[activeFilterIdx])
+    
+    -- Draw logs list border
+    theme.gset(2, startY - 1, "+" .. string.rep("-", W - 4) .. "+", theme.C.border, theme.C.bg)
+    for y = startY, endY do
+      theme.gset(2, y, "|", theme.C.border, theme.C.bg)
+      theme.gset(W - 1, y, "|", theme.C.border, theme.C.bg)
+    end
+    theme.gset(2, endY + 1, "+" .. string.rep("-", W - 4) .. "+", theme.C.border, theme.C.bg)
+    
+    -- Render logs
+    local startIdx = 1
+    local endIdx = #filteredLogs
+    
+    if #filteredLogs > height then
+      local maxOffset = #filteredLogs - height
+      if scrollOffset > maxOffset then scrollOffset = maxOffset end
+      if scrollOffset < 0 then scrollOffset = 0 end
+      
+      startIdx = #filteredLogs - height + 1 - scrollOffset
+      endIdx = #filteredLogs - scrollOffset
+    end
+    
+    local drawY = startY
+    for idx = startIdx, endIdx do
+      local item = filteredLogs[idx]
+      if item then
+        local color = theme.C.text
+        if item.level == "DEBUG" then
+          color = theme.C.dim
+        elseif item.level == "WARNING" then
+          color = theme.C.warn
+        elseif item.level == "ERROR" then
+          color = theme.C.ring_down
+        end
+        
+        local prefixStr = ""
+        if item.time ~= "" then
+          prefixStr = "[" .. item.time .. "] [" .. item.tag .. "] "
+        else
+          prefixStr = "[" .. item.tag .. "] "
+        end
+        
+        local lineText = prefixStr .. item.message
+        lineText = theme.pad(lineText, W - 6)
+        theme.gset(3, drawY, lineText, color, theme.C.bg)
+      end
+      drawY = drawY + 1
+    end
+    
+    -- Clear empty lines in list box
+    for y = drawY, endY do
+      theme.gfill(3, y, W - 4, 1, " ", theme.C.text, theme.C.bg)
+    end
+    
+    -- Show scroll indicator if applicable
+    if #filteredLogs > height then
+      local scrollPercent = math.floor((scrollOffset / (#filteredLogs - height)) * 100)
+      local indicatorText = string.format(" %d%% ", 100 - scrollPercent)
+      theme.gset(W - 10, startY - 1, indicatorText, theme.C.title, theme.C.bg)
+    end
+  end
+  
+  drawScreen()
+  
+  -- Event loop for log viewer
+  while true do
+    local ev, _, _, keyCode = event.pull(2, "key_up")
+    
+    if ev == "key_up" then
+      if keyCode == keyboard.keys.q or keyCode == keyboard.keys.b or keyCode == keyboard.keys.escape then
+        break
+      elseif keyCode == keyboard.keys.left then
+        activeFilterIdx = activeFilterIdx - 1
+        if activeFilterIdx < 1 then activeFilterIdx = #filters end
+        scrollOffset = 0
+        drawScreen()
+      elseif keyCode == keyboard.keys.right then
+        activeFilterIdx = activeFilterIdx + 1
+        if activeFilterIdx > #filters then activeFilterIdx = 1 end
+        scrollOffset = 0
+        drawScreen()
+      elseif keyCode == keyboard.keys.up then
+        local filteredLogs = loadAndParseLogs(filePath, filters[activeFilterIdx])
+        if #filteredLogs > height then
+          scrollOffset = math.min(#filteredLogs - height, scrollOffset + 1)
+          drawScreen()
+        end
+      elseif keyCode == keyboard.keys.down then
+        if scrollOffset > 0 then
+          scrollOffset = scrollOffset - 1
+          drawScreen()
+        end
+      end
+    elseif ev == nil then
+      -- Auto-refresh logs every 2 seconds
+      drawScreen()
+    end
+  end
+end
+
+return logViewer
+
+
+
+
+================================================================================
+FILE: lib/state-machine-lib.lua
+================================================================================
+-- State Machine Lib
+-- Author: Navatusein
+-- License: MIT
+-- Version: 1.3
+
+---@class State
+---@field name string
+---@field init? fun()
+---@field update? fun()
+---@field exit? fun()
+
+local stateMachine = {}
+
+---Crate new StateMachine object
+---@return StateMachine
+function stateMachine:new()
+
+  ---@class StateMachine
+  local obj = {}
+
+  obj.states = {}
+  obj.data = {}
+
+  obj.currentState = nil
+
+  ---Create new state
+  ---@param name string
+  ---@return State
+  function obj:createState(name)
+    return {name = name}
+  end
+
+  ---Update
+  function obj:update()
+    if self.currentState ~= nil then
+      if self.currentState.update then
+        self.currentState:update()
+      end
+    end
+  end
+
+  ---Set state
+  ---@param state State
+  function obj:setState(state)
+    assert(state ~= nil, "Cannot set a nil state.")
+
+    if self.currentState ~= nil then
+      if self.currentState.exit then
+        self.currentState:exit()
+      end
+    end
+
+    self.currentState = state
+
+    if self.currentState.init then
+      self.currentState:init()
+    end
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return stateMachine
+
+
+
+================================================================================
+FILE: lib/component-discover-lib.lua
+================================================================================
+-- Component Discover Lib
+-- Author: Navatusein
+-- License: MIT
+-- Version: 1.2
+
+local component = require("component")
+
+---@class TransposerItemStorageDescriptor
+---@field side number
+---@field slot number
+
+---@class TransposerFluidStorageDescriptor
+---@field side number
+---@field tank number
+
+---Escape special chars from pattern
+---@param text string
+---@return string
+---@private
+local function escapePattern(text)
+  local specialChars = "().%+-*?[^$"
+  local escapePattern = text:gsub("([%" .. specialChars .. "])", "%%%1")
+  return escapePattern
+end
+
+---Get sides for check without ignored sides
+---@param ignoreSides integer[]
+---@return integer[]
+---@private
+local function getSidesForCheck(ignoreSides)
+  local sidesForCheck = {0, 1, 2, 3, 4, 5}
+
+  for _, ignoreSide in pairs(ignoreSides) do
+    for sideIndex, side in pairs(sidesForCheck) do
+      if ignoreSide == side then
+        table.remove(sidesForCheck, sideIndex)
+      end
+    end
+  end
+
+  return sidesForCheck
+end
+
+local componentDiscover = {}
+
+-- Cache to store discovered machine proxies and avoid slow getName() calls
+local machineCache = nil
+
+---Discover component proxy by address part
+---@generic T
+---@param address string
+---@param name string
+---@param type `T`
+---@return T
+function componentDiscover.discoverProxy(address, name, type)
+  local fullAddress = component.get(address, type)
+
+  if fullAddress == nil then
+    error("Invalid address of "..type.." "..name)
+  end
+
+  return component.proxy(fullAddress, type)
+end
+
+---Discover gt_machine by name
+---@param machineName string
+---@return gt_machine|nil
+function componentDiscover.discoverGtMachine(machineName)
+  if not machineCache then
+    machineCache = {}
+    for key, value in pairs(component.list()) do
+      if value == "gt_machine" then
+        local machineProxy = component.proxy(key, "gt_machine")
+        if machineProxy then
+          local ok, name = pcall(machineProxy.getName)
+          if ok and name then
+            machineCache[name] = machineProxy
+          end
+        end
+      end
+    end
+  end
+
+  return machineCache[machineName]
+end
+
+---Discover item storages sides connected to transposer
+---@param proxy any
+---@param ignoreSides any
+---@return table
+function componentDiscover.discoverTransposerItemStorageSide(proxy, ignoreSides)
+  ignoreSides = ignoreSides or {}
+
+  local sides = {}
+  local sidesForCheck = getSidesForCheck(ignoreSides)
+
+  for _, side in pairs(sidesForCheck) do
+    local stacks = proxy.getAllStacks(side)
+
+    if stacks ~= nil then
+      table.insert(sides, side)
+    end
+  end
+
+  return sides
+end
+
+---Discover item storage connected to transposer
+---@param proxy transposer
+---@param itemLabels string[]
+---@param ignoreSides? integer[]
+---@return TransposerItemStorageDescriptor[]
+---@return string[]
+function componentDiscover.discoverTransposerItemStorage(proxy, itemLabels, ignoreSides)
+  ignoreSides = ignoreSides or {}
+
+  local itemStorageDescriptor = {}
+  local sidesForCheck = getSidesForCheck(ignoreSides)
+
+  for _, side in pairs(sidesForCheck) do
+    local stacks = proxy.getAllStacks(side)
+
+    if stacks ~= nil then
+      local slots = stacks.getAll()
+
+      for slotIndex, slot in pairs(slots) do
+
+        if next(slot) ~= nil then
+          for itemLabelIndex, itemLabel in pairs(itemLabels) do
+            if slot.label ~= nil and string.match(slot.label, escapePattern(itemLabel)) then
+              table.remove(itemLabels, itemLabelIndex)
+              itemStorageDescriptor[itemLabel] = {side = side, slot = slotIndex + 1}
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return itemStorageDescriptor, itemLabels
+end
+
+---Discover fluid storage connected to transposer
+---@param proxy transposer
+---@param fluidNames string[]
+---@param ignoreSides? integer[]
+---@return TransposerFluidStorageDescriptor[]
+---@return string[]
+function componentDiscover.discoverTransposerFluidStorage(proxy, fluidNames, ignoreSides)
+  ignoreSides = ignoreSides or {}
+  local fluidStorageDescriptor = {}
+  local sidesForCheck = getSidesForCheck(ignoreSides)
+
+  for _, side in pairs(sidesForCheck) do
+    if proxy.getTankCount(side) ~= 0 then
+      local tankCount = proxy.getTankCount(side)
+
+      for tankIndex = 1, tankCount, 1 do
+        local fluid = proxy.getFluidInTank(side, tankIndex)
+
+        for fluidNameIndex, fluidName in pairs(fluidNames) do
+          if fluid.name ~= nil and string.match(fluid.name, escapePattern(fluidName)) then
+            table.remove(fluidNames, fluidNameIndex)
+            fluidStorageDescriptor[fluidName] = {side = side, tank = tankIndex}
+            break
+          end
+        end
+      end
+     end
+  end
+
+  return fluidStorageDescriptor, fluidNames
+end
+
+return componentDiscover
+
+
+
+================================================================================
+FILE: lib/gt-sensor-parser.lua
+================================================================================
+-- GT Sensor Parser Lib
+-- Author: Navatusein
+-- License: MIT
+-- Version: 1.0
+
+local event = require("event")
+
+local function escapePattern(text)
+  local specialChars = "().%+-*?[^$"
+  return text:gsub("([%" .. specialChars .. "])", "%%%1")
+end
+
+local gtSensorParser = {}
+
+---Crate new GTSensorParser object
+---@param gtMachineProxy gt_machine
+---@return GTSensorParser
+function gtSensorParser:new(gtMachineProxy) 
+  ---@class GTSensorParser
+  local obj = {}
+
+  obj.gtMachineProxy = gtMachineProxy
+
+  ---@type string[]
+  obj.sensorData = {}
+
+  function obj:getInformation()
+    self.sensorData = self.gtMachineProxy.getSensorInformation()
+  end
+
+  ---Get number from line of gt sensor information
+  ---@param line integer
+  ---@param prefix? string
+  ---@param postfix? string
+  ---@return number|nil
+  function obj:getNumber(line, prefix, postfix)
+    local data = self.sensorData[line]
+
+    if data == nil then
+      return nil
+    end
+
+    if prefix ~= nil then
+      data = string.gsub(data, escapePattern(prefix), "")
+    end
+
+    if postfix ~= nil then
+      data = string.gsub(data, escapePattern(postfix), "")
+    end
+
+    data = string.gsub(data, "§.", "")
+    data = string.gsub(data, ",", "")
+    data = string.match(data, "([%d%.,]+)")
+
+    return tonumber(data)
+  end
+
+  ---Get string from line of gt sensor information
+  ---@param line integer
+  ---@param prefix? string
+  ---@param postfix? string
+  ---@return string|nil
+  function obj:getString(line, prefix, postfix)
+    local data = self.sensorData[line]
+
+    if data == nil then
+      return nil
+    end
+
+    if prefix ~= nil then
+      data = string.gsub(data, escapePattern(prefix), "")
+    end
+
+    if postfix ~= nil then
+      data = string.gsub(data, escapePattern(postfix), "")
+    end
+
+    data = string.gsub(data, "§.", "")
+
+    return data
+  end
+
+  ---comment
+  ---@param line integer
+  ---@param value string
+  ---@return boolean|nil
+  function obj:stringHas(line, value)
+    local data = self.sensorData[line]
+
+    if data == nil then
+      return nil
+    end
+
+    return string.match(data, value) ~= nil
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return gtSensorParser
+
+
+
+================================================================================
+FILE: lib/list-lib.lua
+================================================================================
+-- List Lib
+-- Author: Navatusein
+-- License: MIT
+-- Version: 1.4
+
+---@class ListConfig
+---@field maxSize number|nil
+
+local list = {}
+
+---Crate new List object from config
+---@param config ListConfig
+---@return List
+function list:newFormConfig(config)
+  return self:new(config.maxSize)
+end
+
+---Crate new List object
+---@param maxSize? number
+---@return List
+function list:new(maxSize)
+
+  ---@class List
+  local obj = {}
+
+  obj.list = {}
+  obj.maxSize = maxSize
+
+  ---Add item to front
+  ---@param value any
+  function obj:pushFront(value)
+    table.insert(self.list, 1, value)
+
+    if self.maxSize and #self.list > self.maxSize then
+        table.remove(self.list)
+    end
+  end
+
+  ---Add item to back
+  ---@param value any
+  function obj:pushBack(value)
+    table.insert(self.list, value)
+
+    if self.maxSize and #self.list > self.maxSize then
+      table.remove(self.list, 1)
+    end
+  end
+
+  ---Remove item form front
+  function obj:popFront()
+    table.remove(self.list, 1)
+  end
+
+  ---Remove item from back
+  function obj:popBack()
+    table.remove(self.list)
+  end
+
+  ---Clear list
+  function obj:clear()
+    for _ = 1, #self.list, 1 do
+      table.remove(self.list)
+    end
+  end
+
+  ---Calculate average
+  ---@return integer
+  function obj:average()
+    if #self.list == 0 then
+      return 0
+    end
+
+    local result = 0
+
+    for _, value in ipairs(self.list) do
+      if type(value) == "number" then
+        result = result + value
+      end
+    end
+
+    return result / #self.list
+  end
+
+  ---Calculate median
+  ---@return integer
+  function obj:median()
+    if #self.list == 0 then
+      return 0
+    end
+
+    local temp = {}
+
+    for _, value in ipairs(self.list) do
+      if type(value) == "number" then
+        table.insert(temp, value)
+      end
+    end
+
+    table.sort(temp)
+
+    if math.fmod(#temp, 2) == 0 then
+      return (temp[#temp / 2] + temp[(#temp / 2) + 1]) / 2
+    else
+      return temp[math.ceil(#temp / 2)]
+    end
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return list
+
+
+
+================================================================================
+FILE: src/line-controller.lua
+================================================================================
+local event = require("event")
+local componentDiscoverLib = require("lib.component-discover-lib")
+
+local lineController = {}
+
+function lineController:newFormConfig()
+  return self:new()
+end
+
+function lineController:new()
+  local obj = {}
+
+  obj.controllerProxy = nil
+  local lastWorkProgress = 0
+
+  function obj:init()
+    self:findMachineProxy()
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationplant")
+
+    if self.controllerProxy == nil then
+      error("[Line] Water Purification Plant not found")
+    end
+  end
+
+  function obj:loop()
+    local workProgress = self.controllerProxy.getWorkProgress()
+
+    if lastWorkProgress > workProgress or (self.controllerProxy.hasWork() == false and lastWorkProgress ~= 0) then
+      event.push("cycle_end")
+      lastWorkProgress = 0
+    end
+
+    if self.controllerProxy.hasWork() then 
+      lastWorkProgress = workProgress
+    end
+  end
+
+  function obj:getState()
+    if self.controllerProxy == nil then
+      return "nil"
+    end
+
+    if self.controllerProxy.hasWork() then
+      return tostring(math.ceil(self.controllerProxy.getWorkProgress() / 20)).."/"..tostring(math.ceil(self.controllerProxy.getWorkMaxProgress()/20))
+    end
+
+    return "Disable"
+  end
+
+  function obj:disable()
+    if self.controllerProxy ~= nil then
+      self.controllerProxy.setWorkAllowed(false)
+    end
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return lineController
+
+
+
+================================================================================
+FILE: src/t3-controller.lua
+================================================================================
+local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
+
+local t3controller = {}
+
+function t3controller:newFormConfig(config)
+  return self:new(config.transposerAddress)
+end
+
+function t3controller:new(transposerAddress)
+  local obj = {}
+
+  obj.transposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerLiquids = {}
+
+  obj.requiredCount = 900000;
+
+  function obj:init()
+    self:findMachineProxy()
+    self:findTransposerFluid(self.transposerProxy, "polyaluminiumchloride")
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.hasWork() then
+        self.stateMachine:setState(self.stateMachine.states.work)
+      end
+    end
+
+    self.stateMachine.states.work = self.stateMachine:createState("Work")
+    self.stateMachine.states.work.init = function()
+      local currentCount = self.gtSensorParser:getNumber(4, "Polyaluminium Chloride consumed this cycle: §c")
+
+      if currentCount ~= nil and currentCount >= self.requiredCount then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      local fluidInTank = self.transposerProxy.getFluidInTank(
+        self.transposerLiquids["polyaluminiumchloride"].side,
+        self.transposerLiquids["polyaluminiumchloride"].tank
+      )
+
+      local countToAdd = self.requiredCount
+
+      if fluidInTank.amount < self.requiredCount then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T3] Not enough Polyaluminium Chloride for craft")
+
+        countToAdd = fluidInTank.amount - (fluidInTank.amount % 100000)
+      end
+
+      local _, result = self.transposerProxy.transferFluid(
+        self.transposerLiquids["polyaluminiumchloride"].side,
+        sides.up,
+        countToAdd,
+        self.transposerLiquids["polyaluminiumchloride"].tank
+      )
+
+      if result ~= countToAdd then
+        event.push("log_warning", "[T3] Fluid transfer error")
+      end
+
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitflocculator")
+
+    if self.controllerProxy == nil then
+      error("[T3] Flocculation Purification Unit not found")
+    end
+
+    self.transposerProxy = componentDiscoverLib.discoverProxy(transposerAddress, "[T3] Transposer", "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerFluid(proxy, fluidName)
+    local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, {fluidName}, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T4] Can't find liquid: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerLiquids[key] = value
+    end
+  end
+
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
+  end
+
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return t3controller
+
+
+
+================================================================================
+FILE: src/t4-controller.lua
+================================================================================
+local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
+
+local t4controller = {}
+
+function t4controller:newFormConfig(config)
+  return self:new(config.hydrochloricAcidTransposerAddress, config.sodiumHydroxideTransposerAddress)
+end
+
+function t4controller:new(hydrochloricAcidTransposerAddress, sodiumHydroxideTransposerAddress)
+  local obj = {}
+
+  obj.hydrochloricAcidTransposerProxy = nil
+  obj.sodiumHydroxideTransposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerLiquids = {}
+  obj.transposerItems = {}
+
+  function obj:init()
+    self:findMachineProxy()
+    self:findTransposerFluid(self.hydrochloricAcidTransposerProxy, "hydrochloricacid_gt5u")
+    self:findTransposerItem(self.sodiumHydroxideTransposerProxy, "Sodium Hydroxide Dust")
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.hasWork() then
+        self.stateMachine:setState(self.stateMachine.states.work)
+      end
+    end
+
+    self.stateMachine.states.work = self.stateMachine:createState("Work")
+    self.stateMachine.states.work.update = function()
+      local phValue = self.gtSensorParser:getNumber(4, "Current pH Value:")
+
+      if phValue == nil then
+        return
+      end
+
+      local diffPh = 7 - phValue
+      local count = math.floor(math.abs(diffPh / 0.01))
+
+      if count == 0 then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      if diffPh > 0 then
+        self:putSodiumHydroxide(count)
+      else
+        self:putHydrochloricAcid(count)
+      end
+
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitphadjustment")
+
+    if self.controllerProxy == nil then
+      error("[T4] pH Neutralization Purification Unit not found")
+    end
+
+    self.hydrochloricAcidTransposerProxy = componentDiscoverLib.discoverProxy(
+      hydrochloricAcidTransposerAddress,
+      "[T4] Hydrochloric Acid Transposer",
+      "transposer")
+    self.sodiumHydroxideTransposerProxy = componentDiscoverLib.discoverProxy(
+      sodiumHydroxideTransposerAddress,
+      "[T4] Sodium Hydroxide Transposer",
+      "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerItem(proxy, itemLabels)
+    local result, skipped = componentDiscoverLib.discoverTransposerItemStorage(proxy, {itemLabels}, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T4] Can't find items: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerItems[key] = value
+    end
+  end
+
+  function obj:findTransposerFluid(proxy, fluidName)
+    local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, {fluidName}, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T4] Can't find liquid: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerLiquids[key] = value
+    end
+  end
+
+  function obj:putSodiumHydroxide(count) 
+    for i = 1, math.ceil(count / 64), 1 do
+      local sodiumHydroxideCount = 0
+
+      if (count - 64 * (i - 1) > 64) then
+        sodiumHydroxideCount = 64
+      else
+        sodiumHydroxideCount = math.floor(count % 64)
+      end
+
+      local result = self.sodiumHydroxideTransposerProxy.transferItem(
+        self.transposerItems["Sodium Hydroxide Dust"].side,
+        sides.bottom,
+        sodiumHydroxideCount)
+
+      if result ~= sodiumHydroxideCount then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T4] Not enough Sodium Hydroxide for craft")
+        break
+      end
+    end
+  end
+
+  function obj:putHydrochloricAcid(count)
+    local hydrochloricAcidCount = count * 10
+
+    local _, result = self.hydrochloricAcidTransposerProxy.transferFluid(
+      self.transposerLiquids["hydrochloricacid_gt5u"].side,
+      sides.bottom,
+      hydrochloricAcidCount,
+      self.transposerLiquids["hydrochloricacid_gt5u"].tank)
+
+    if result ~= hydrochloricAcidCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T4] Not enough Hydrochloric Acid for craft")
+    end
+
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
+  end
+
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return t4controller
+
+
+
+================================================================================
+FILE: src/t5-controller.lua
+================================================================================
+local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
+
+local t5controller = {}
+
+function t5controller:newFormConfig(config)
+  return self:new(config.plasmaTransposerAddress, config.coolantTransposerAddress)
+end
+
+function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
+  local obj = {}
+
+  obj.plasmaTransposerProxy = nil
+  obj.coolantTransposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerLiquids = {}
+
+  obj.coolantCount = 2000
+  obj.plasmaCount = 100
+
+  function obj:init()
+    self:findMachineProxy()
+    self:findTransposerFluid(self.plasmaTransposerProxy, "plasma.helium")
+    self:findTransposerFluid(self.coolantTransposerProxy, "supercoolant")
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.init = function ()
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+
+      if self.controllerProxy.hasWork() and temperature ~= nil and temperature ~= 0 then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      end
+    end
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.getWorkProgress() > 900 then 
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      if self.controllerProxy.hasWork() then
+        self.stateMachine.data.iterations = 0
+        self.stateMachine:setState(self.stateMachine.states.heating)
+      end
+    end
+
+    self.stateMachine.states.heating = self.stateMachine:createState("Heating")
+    self.stateMachine.states.heating.init = function ()
+      if self.stateMachine.data.iterations >= 2 then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      local _, result = self.plasmaTransposerProxy.transferFluid(
+        self.transposerLiquids["plasma.helium"].side,
+        sides.up,
+        self.plasmaCount,
+        self.transposerLiquids["plasma.helium"].tank)
+
+      if result ~= self.plasmaCount then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T5] Not enough Helium Plasma for craft")
+      end
+    end
+    self.stateMachine.states.heating.update = function()
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+
+      if self.controllerProxy.hasWork() == false then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+
+      if temperature >= 10000 then
+        self.stateMachine:setState(self.stateMachine.states.cooling)
+      end
+    end
+
+    self.stateMachine.states.cooling = self.stateMachine:createState("Cooling")
+    self.stateMachine.states.cooling.init = function ()
+      local _, result = self.coolantTransposerProxy.transferFluid(
+        self.transposerLiquids["supercoolant"].side,
+        sides.up,
+        self.coolantCount,
+        self.transposerLiquids["supercoolant"].tank)
+
+      if result ~= self.coolantCount then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T5] Not enough Super Coolant for craft")
+      end
+    end
+    self.stateMachine.states.cooling.update = function()
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+
+      if self.controllerProxy.hasWork() == false then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+
+      if temperature <= 0 then
+        self.stateMachine:setState(self.stateMachine.states.heating)
+        self.stateMachine.data.iterations = self.stateMachine.data.iterations + 1
+      end
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitplasmaheater")
+
+    if self.controllerProxy == nil then
+      error("[T5] Extreme Temperature Fluctuation Purification Unit not found")
+    end
+
+    self.plasmaTransposerProxy = componentDiscoverLib.discoverProxy(plasmaTransposerAddress, "[T5] Plasma Transposer", "transposer")
+    self.coolantTransposerProxy = componentDiscoverLib.discoverProxy(coolantTransposerAddress, "[T5] Coolant Transposer", "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerFluid(proxy, fluidName)
+    local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, {fluidName}, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T5] Can't find liquid: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerLiquids[key] = value
+    end
+  end
+
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
+  end
+
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return t5controller
+
+
+
+================================================================================
+FILE: src/t6-controller.lua
+================================================================================
+local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
+
+local t6controller = {}
+
+function t6controller:newFormConfig(config)
+  return self:new(config.transposerAddress)
+end
+
+function t6controller:new(transposerAddress)
+  local obj = {}
+
+  obj.transposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerItems = {}
+
+  function obj:init()
+    self:findMachineProxy()
+    self:resetLenses()
+    self:findTransposerItem(self.transposerProxy, {
+      "Orundum Lens",
+      "Amber Lens",
+      "Aer Lens",
+      "Emerald Lens",
+      "Mana Diamond Lens",
+      "Blue Topaz Lens",
+      "Amethyst Lens",
+      "Fluor-Buergerite Lens",
+      "Dilithium Lens"
+    })
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.init = function ()
+      if self.stateMachine.data.currentLens ~= nil then
+        self.transposerProxy.transferItem(
+          sides.bottom, 
+          self.transposerItems[self.stateMachine.data.currentLens].side,
+          1,
+          1,
+          self.transposerItems[self.stateMachine.data.currentLens].slot)
+      end
+    end
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.hasWork() then
+        self.stateMachine:setState(self.stateMachine.states.changeLens)
+      end
+    end
+
+    self.stateMachine.states.changeLens = self.stateMachine:createState("Change Lens")
+    self.stateMachine.states.changeLens.init = function()
+      local lens = self.gtSensorParser:getString(5, "Current lens requested: ")
+      local recipeError = self.gtSensorParser:getString(6)
+
+      if lens == nil or recipeError == "Removed lens too early. Failing this recipe." then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      self:putLens(lens)
+    end
+
+    self.stateMachine.states.waitLens = self.stateMachine:createState("Wait Lens")
+    self.stateMachine.states.waitLens.update = function()
+      local lens = self.gtSensorParser:getString(5, "Current lens requested: ")
+
+      if self.controllerProxy.hasWork() == false then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+        return
+      end
+
+      if self.stateMachine.data.currentLens ~= lens then
+        self.stateMachine:setState(self.stateMachine.states.changeLens)
+      end
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunituvtreatment")
+
+    if self.controllerProxy == nil then
+      error("[T6] High Energy Laser Purification Unit not found")
+    end
+
+    self.transposerProxy = componentDiscoverLib.discoverProxy(transposerAddress, "[T6] Transposer", "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerItem(proxy, itemLabels)
+    local result, skipped = componentDiscoverLib.discoverTransposerItemStorage(proxy, itemLabels)
+
+    if #skipped ~= 0 then
+      if not (#skipped == 1 and skipped[1] == "Dilithium Lens") then
+        error("[T6] Can't find items: "..table.concat(skipped, ", "))
+      end
+    end
+
+    for key, value in pairs(result) do
+      self.transposerItems[key] = value
+    end
+  end
+
+  function obj:resetLenses()
+    local transposerSides = componentDiscoverLib.discoverTransposerItemStorageSide(self.transposerProxy, {sides.bottom})
+
+    if transposerSides[1] ~= nil then
+      self.transposerProxy.transferItem(sides.bottom, transposerSides[1], 1)
+    end
+  end
+
+  function obj:putLens(lens)
+    if self.stateMachine.data.currentLens ~= nil then
+      self.transposerProxy.transferItem(
+        sides.bottom,
+        self.transposerItems[self.stateMachine.data.currentLens].side,
+        1,
+        1,
+        self.transposerItems[self.stateMachine.data.currentLens].slot)
+    end
+
+    if lens == "Dilithium Lens" and self.transposerItems[lens] == nil then
+      self.stateMachine.data.currentLens = nil
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      return
+    end
+
+    local result = self.transposerProxy.transferItem(
+      self.transposerItems[lens].side,
+      sides.bottom,
+      1,
+      self.transposerItems[lens].slot)
+
+    if result ~= 1 then
+      self.controllerProxy.setWorkAllowed(false)
+      self.stateMachine.data.currentLens = nil
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      event.push("log_warning", "[T6] Invalid slot: "..self.transposerItems[lens].slot.." for: "..lens)
+      return
+    end
+
+    self.stateMachine.data.currentLens = lens
+
+    if lens == "Dilithium Lens" then
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    else
+      self.stateMachine:setState(self.stateMachine.states.waitLens)
+    end
+  end
+
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
+  end
+
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return t6controller
+
+
+
+================================================================================
+FILE: src/t7-controller.lua
+================================================================================
+local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
+
+local t7controller = {}
+
+function t7controller:newFormConfig(config)
+  return self:new(
+    config.inertGasTransposerAddress,
+    config.superConductorTransposerAddress,
+    config.netroniumTransposerAddress,
+    config.coolantTransposerAddress)
+end
+
+function t7controller:new(
+  inertGasTransposerAddress,
+  superConductorTransposerAddress,
+  netroniumTransposerAddress,
+  coolantTransposerAddress)
+
+  local obj = {}
+
+  obj.inertGasTransposerProxy = nil
+  obj.superConductorTransposerProxy = nil
+  obj.netroniumTransposerProxy = nil
+  obj.coolantTransposerProxy = nil
+  obj.controllerProxy = nil
+
+  obj.transposerLiquids = {}
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.superconductorCount = 1440
+  obj.neutroniumCount = 4608
+  obj.supercoolantCount = 10000
+
+  function obj:init()
+    self:findMachineProxy()
+
+    self:findTransposerFluid(self.inertGasTransposerProxy, {"helium", "neon", "krypton", "xenon"})
+    self:findTransposerFluid(self.superConductorTransposerProxy, {"superconductor"})
+    self:findTransposerFluid(self.netroniumTransposerProxy, {"neutronium"})
+    self:findTransposerFluid(self.coolantTransposerProxy, {"supercoolant"})
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.update = function()
+      if self.gtSensorParser:getNumber(2, "Success chance:") == 100 then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      elseif self.controllerProxy.hasWork() then
+        self.stateMachine:setState(self.stateMachine.states.work)
+      end
+    end
+
+    self.stateMachine.states.work = self.stateMachine:createState("Work")
+    self.stateMachine.states.work.init = function()
+      local bitString = self.gtSensorParser:getString(4, "Current control signal (binary): 0b")
+
+      if bitString == nil then
+        bitString = "0000"
+      end
+
+      local bits = self:bitParser(bitString)
+
+      if bits[1] == false and bits[2] == false and bits[3] == false and bits[4] == false then
+        self:putCoolant()
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      if bits[4] == true then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return
+      end
+
+      if bits[1] == true then
+        self:putInertGas(bits)
+      end
+
+      if bits[2] == true then
+        self:putSuperConductor()
+      end
+
+      if bits[3] == true then
+        self:putNeutronium()
+      end
+
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.idle)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitdegasifier")
+
+    if self.controllerProxy == nil then
+      error("[T7] Residual Decontaminant Degasser Purification Unit not found")
+    end
+
+    self.inertGasTransposerProxy = componentDiscoverLib.discoverProxy(
+      inertGasTransposerAddress,
+      "[T7] Inert Gas Transposer",
+      "transposer")
+    self.superConductorTransposerProxy = componentDiscoverLib.discoverProxy(
+      superConductorTransposerAddress,
+      "[T7] Super Conductor Transposer",
+      "transposer")
+    self.netroniumTransposerProxy = componentDiscoverLib.discoverProxy(
+      netroniumTransposerAddress,
+      "[T7] Netronium Transposer",
+      "transposer")
+    self.coolantTransposerProxy = componentDiscoverLib.discoverProxy(
+      coolantTransposerAddress,
+      "[T7] Coolant Transposer",
+      "transposer")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerFluid(proxy, fluidNames)
+    local result, skipped = componentDiscoverLib.discoverTransposerFluidStorage(proxy, fluidNames, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T7] Can't find liquid: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerLiquids[key] = value
+    end
+  end
+
+  function obj:bitParser(bitString)
+    bitString = string.rep("0", 4 - #bitString)..bitString
+
+    local bits = {
+      tonumber(bitString:sub(4, 4)) == 1,
+      tonumber(bitString:sub(3, 3)) == 1,
+      tonumber(bitString:sub(2, 2)) == 1,
+      tonumber(bitString:sub(1, 1)) == 1,
+    }
+
+    return bits
+  end
+
+  function obj:putInertGas(bits)
+    local inertGas = ""
+    local count = 0
+
+    if bits[2] == false and bits[3] == false then
+      inertGas = "helium"
+      count = 10000
+    elseif bits[2] == true and bits[3] == false then
+      inertGas = "neon"
+      count = 7500
+    elseif bits[2] == false and bits[3] == true then
+      inertGas = "krypton"
+      count = 5000
+    elseif bits[2] == true and bits[3] == true then
+      inertGas = "xenon"
+      count = 2500
+    end
+
+    local _, result = self.inertGasTransposerProxy.transferFluid(
+      self.transposerLiquids[inertGas].side,
+      sides.up,
+      count,
+      self.transposerLiquids[inertGas].tank)
+
+    if result ~= count then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough "..inertGas.." for craft")
+    end
+  end
+
+  function obj:putSuperConductor()
+    local _, result = self.superConductorTransposerProxy.transferFluid(
+      self.transposerLiquids["superconductor"].side,
+      sides.up,
+      self.superconductorCount,
+      self.transposerLiquids["superconductor"].tank)
+
+    if result ~= self.superconductorCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough superconductor for craft")
+    end
+  end
+
+  function obj:putNeutronium()
+    local _, result = self.netroniumTransposerProxy.transferFluid(
+      self.transposerLiquids["neutronium"].side,
+      sides.up,
+      self.neutroniumCount,
+      self.transposerLiquids["neutronium"].tank)
+
+    if result ~= self.neutroniumCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough neutronium for craft")
+    end
+  end
+
+  function obj:putCoolant()
+    local _, result = self.coolantTransposerProxy.transferFluid(
+      self.transposerLiquids["supercoolant"].side,
+      sides.up,
+      self.supercoolantCount,
+      self.transposerLiquids["supercoolant"].tank)
+
+    if result ~= self.supercoolantCount then
+      self.controllerProxy.setWorkAllowed(false)
+      event.push("log_warning", "[T7] Not enough coolant for craft")
+    end
+  end
+
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
+  end
+
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return t7controller
+
+
+
+================================================================================
+FILE: src/t8-controller.lua
+================================================================================
+local sides = require("sides")
+local event = require("event")
+
+local stateMachineLib = require("lib.state-machine-lib")
+local componentDiscoverLib = require("lib.component-discover-lib")
+local gtSensorParserLib = require("lib.gt-sensor-parser")
+
+local t8controller = {}
+
+function t8controller:newFormConfig(config)
+  return self:new(config.maxQuarkCount, config.transposerAddress, config.subMeInterfaceAddress)
+end
+
+function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddress)
+  local obj = {}
+
+  obj.maxQuarkCount = maxQuarkCount
+
+  obj.transposerProxy = nil
+  obj.subMeInterfaceProxy = nil
+  obj.controllerProxy = nil
+
+  obj.stateMachine = stateMachineLib:new()
+  obj.gtSensorParser = nil
+
+  obj.transposerItems = {}
+
+  function obj:init()
+    self:findMachineProxy()
+    self:findTransposerItem(self.transposerProxy, {
+      "Up-Quark Releasing Catalyst",
+      "Down-Quark Releasing Catalyst",
+      "Strange-Quark Releasing Catalyst",
+      "Charm-Quark Releasing Catalyst",
+      "Bottom-Quark Releasing Catalyst",
+      "Top-Quark Releasing Catalyst"
+    })
+
+    self.gtSensorParser:getInformation()
+
+    self.stateMachine.states.idle = self.stateMachine:createState("Idle")
+    self.stateMachine.states.idle.update = function()
+      if self.controllerProxy.hasWork() then
+        if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+          self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        else
+          self.stateMachine:setState(self.stateMachine.states.putFirst)
+        end
+      end
+    end
+
+    self.stateMachine.states.putFirst = self.stateMachine:createState("Put First")
+    self.stateMachine.states.putFirst.init = function()
+      self:putQuarks(1)
+      self.stateMachine:setState(self.stateMachine.states.resultPutFirst)
+    end
+
+    self.stateMachine.states.resultPutFirst = self.stateMachine:createState("Result Put First")
+    self.stateMachine.states.resultPutFirst.update = function()
+      if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      else
+        self.stateMachine:setState(self.stateMachine.states.putSecond)
+      end
+    end
+
+    self.stateMachine.states.putSecond = self.stateMachine:createState("Put Second")
+    self.stateMachine.states.putSecond.init = function()
+      self:putQuarks(2)
+      self.stateMachine:setState(self.stateMachine.states.resultPutSecond)
+    end
+
+    self.stateMachine.states.resultPutSecond = self.stateMachine:createState("Result Put Second")
+    self.stateMachine.states.resultPutSecond.update = function()
+      if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      else
+        self.stateMachine:setState(self.stateMachine.states.putThird)
+      end
+    end
+
+    self.stateMachine.states.putThird = self.stateMachine:createState("Put Third")
+    self.stateMachine.states.putThird.init = function()
+      self:putQuarks(3)
+      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+    end
+
+    self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
+
+    self.stateMachine.states.craftQuarks = self.stateMachine:createState("Craft Quarks")
+    self.stateMachine.states.craftQuarks.init = function()
+      os.sleep(3)
+
+      local quarks = self.subMeInterfaceProxy.getItemsInNetwork({name = "gregtech:gt.metaitem.03"})
+
+      for _, quark in pairs(quarks) do
+        if quark.label ~= "Unaligned Quark Releasing Catalyst" and quark.size < self.maxQuarkCount then
+          local crafts = self.subMeInterfaceProxy.getCraftables({label = quark.label})
+
+          if crafts[1] == nil then
+            event.push("log_warning", "[T8] No craft for: "..quark.label)
+            self.controllerProxy.setWorkAllowed(false)
+            break
+          end
+
+          crafts[1].request(self.maxQuarkCount - quark.size)
+        end
+      end
+
+      self.stateMachine:setState(self.stateMachine.states.idle)
+    end
+
+    event.listen("cycle_end", function ()
+      if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self.stateMachine:setState(self.stateMachine.states.craftQuarks)
+      end
+    end)
+
+    self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:findMachineProxy()
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitextractor")
+
+    if self.controllerProxy == nil then
+      error("[T8] Absolute Baryonic Perfection Purification Unit not found")
+    end
+
+    self.transposerProxy = componentDiscoverLib.discoverProxy(
+      transposerAddress,
+      "[T8] Transposer",
+      "transposer")
+    self.subMeInterfaceProxy = componentDiscoverLib.discoverProxy(
+      subMeInterfaceAddress,
+      "[T8] Sub Me Interface",
+      "me_interface")
+    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  end
+
+  function obj:findTransposerItem(proxy, itemLabels)
+    local result, skipped = componentDiscoverLib.discoverTransposerItemStorage(proxy, itemLabels, {sides.up})
+
+    if #skipped ~= 0 then
+      error("[T8] Can't find items: "..table.concat(skipped, ", "))
+    end
+
+    for key, value in pairs(result) do
+      self.transposerItems[key] = value
+    end
+  end
+
+  function obj:putQuarks(index)
+    local drops = {
+      {
+        "Up-Quark Releasing Catalyst",
+        "Down-Quark Releasing Catalyst",
+        "Strange-Quark Releasing Catalyst",
+        "Charm-Quark Releasing Catalyst",
+        "Bottom-Quark Releasing Catalyst",
+        "Top-Quark Releasing Catalyst"
+      },
+      {
+        "Up-Quark Releasing Catalyst",
+        "Strange-Quark Releasing Catalyst",
+        "Bottom-Quark Releasing Catalyst",
+        "Down-Quark Releasing Catalyst",
+        "Top-Quark Releasing Catalyst",
+        "Charm-Quark Releasing Catalyst"
+      },
+      {
+        "Up-Quark Releasing Catalyst",
+        "Bottom-Quark Releasing Catalyst",
+        "Down-Quark Releasing Catalyst",
+        "Charm-Quark Releasing Catalyst",
+        "Strange-Quark Releasing Catalyst",
+        "Top-Quark Releasing Catalyst"
+      }
+    }
+
+    self.stateMachine.data.lastPut = index
+
+    for i = 1, 6, 1 do
+      local transfered = self.transposerProxy.transferItem(
+        self.transposerItems[drops[index][i]].side,
+        sides.up,
+        1,
+        self.transposerItems[drops[index][i]].slot)
+
+      if transfered == 0 then
+        self.controllerProxy.setWorkAllowed(false)
+        event.push("log_warning", "[T8] Not enough quarks on slot: "..drops[index][i])
+      end
+    end
+  end
+
+  function obj:loop()
+    self.gtSensorParser:getInformation()
+    self.stateMachine:update()
+  end
+
+  function obj:getState()
+    if self.controllerProxy.isWorkAllowed() == false then
+      return "Controller disabled"
+    end
+
+    if self.controllerProxy.hasWork() == false then
+      return "Wait cycle"
+    end
+
+    local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+
+    if successChange == nil then
+      successChange = 0
+    end
+
+    return "State: ["..state.."] Success: ["..successChange.."%]"
+  end
+
+  setmetatable(obj, self)
+  self.__index = self
+  return obj
+end
+
+return t8controller
+
+
+
