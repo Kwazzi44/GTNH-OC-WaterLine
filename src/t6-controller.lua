@@ -4,6 +4,8 @@ local event = require("event")
 local stateMachineLib = require("lib.state-machine-lib")
 local componentDiscoverLib = require("lib.component-discover-lib")
 local gtSensorParserLib = require("lib.gt-sensor-parser")
+local cycleEndLib = require("lib.cycle-end-lib")
+local controllerInitLib = require("lib.controller-init-lib")
 
 local t6controller = {}
 
@@ -24,9 +26,11 @@ function t6controller:new(config)
   obj.transposerItems = {}
   obj._hadWorkDuringCycle = false
 
-  function obj:init()
+  function obj:_initBody()
     self:findMachineProxy()
+    coroutine.yield()
     self:resetLenses()
+    coroutine.yield()
     self:findTransposerItem(self.transposerProxy, {
       "Orundum Lens",
       "Amber Lens",
@@ -38,6 +42,7 @@ function t6controller:new(config)
       "Fluor-Buergerite Lens",
       "Dilithium Lens"
     })
+    coroutine.yield()
 
     self.gtSensorParser:getInformation()
 
@@ -60,10 +65,10 @@ function t6controller:new(config)
 
     self.stateMachine.states.changeLens = self.stateMachine:createState("Change Lens")
     self.stateMachine.states.changeLens.init = function()
-      local lens = self.gtSensorParser:getString(5, "Current lens requested: ")
-      local recipeError = self.gtSensorParser:getString(6)
+      local lens = self.gtSensorParser:getString(5, "Current lens requested: ", nil, { "lens requested:", "Lens:" })
+      local recipeError = self.gtSensorParser:getString(6, "Removed lens", nil, { "Failing this recipe", "too early" })
 
-      if lens == nil or recipeError == "Removed lens too early. Failing this recipe." then
+      if lens == nil or (recipeError and recipeError:find("Removed lens")) then
         self.stateMachine:setState(self.stateMachine.states.waitEnd)
         return
       end
@@ -73,7 +78,7 @@ function t6controller:new(config)
 
     self.stateMachine.states.waitLens = self.stateMachine:createState("Wait Lens")
     self.stateMachine.states.waitLens.update = function()
-      local lens = self.gtSensorParser:getString(5, "Current lens requested: ")
+      local lens = self.gtSensorParser:getString(5, "Current lens requested: ", nil, { "lens requested:", "Lens:" })
 
       if self.controllerProxy.hasWork() == false then
         self.stateMachine:setState(self.stateMachine.states.idle)
@@ -87,13 +92,22 @@ function t6controller:new(config)
 
     self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
 
-    event.listen("cycle_end", function ()
+    cycleEndLib.register(self, function()
       if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
         self.stateMachine:setState(self.stateMachine.states.idle)
       end
     end)
 
     self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:init()
+    local ok, err = controllerInitLib.runSync(self)
+    if not ok then error(tostring(err)) end
+  end
+
+  function obj:shutdown()
+    cycleEndLib.unregister(self)
   end
 
   function obj:findMachineProxy()
@@ -196,7 +210,7 @@ function t6controller:new(config)
     end
 
     local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
-    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:", nil, { "Success:", "chance:" })
 
     if successChange == nil then
       successChange = 0

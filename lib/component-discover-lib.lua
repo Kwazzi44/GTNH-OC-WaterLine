@@ -4,6 +4,11 @@
 -- Version: 1.2
 
 local component = require("component")
+local event = require("event")
+
+local function yieldToUi()
+  event.pull(0)
+end
 
 ---Escape special chars from pattern
 local function escapePattern(text)
@@ -60,6 +65,7 @@ function componentDiscover.discoverGtMachine(machineName, machineAddress)
           machineCache[name] = machineProxy
         end
       end
+      yieldToUi()
     end
   end
   return machineCache[machineName]
@@ -79,6 +85,7 @@ function componentDiscover.discoverTransposerItemStorageSide(proxy, ignoreSides)
     if stacks ~= nil then
       table.insert(sides, side)
     end
+    yieldToUi()
   end
   return sides
 end
@@ -109,6 +116,7 @@ function componentDiscover.discoverTransposerItemStorage(proxy, itemLabels, igno
         end
       end
     end
+    yieldToUi()
   end
 
   local skipped = {}
@@ -133,15 +141,19 @@ function componentDiscover.discoverTransposerFluidStorage(proxy, fluidNames, ign
       local tankCount = proxy.getTankCount(side)
       for tankIndex = 1, tankCount, 1 do
         local fluid = proxy.getFluidInTank(side, tankIndex)
-        for fluidName in pairs(remainingFluids) do
-          if fluid.name ~= nil and string.match(fluid.name, escapePattern(fluidName)) then
-            remainingFluids[fluidName] = nil
-            fluidStorageDescriptor[fluidName] = {side = side, tank = tankIndex}
-            break
+        if fluid and fluid.name then
+          for fluidName in pairs(remainingFluids) do
+            if string.match(fluid.name, escapePattern(fluidName)) then
+              remainingFluids[fluidName] = nil
+              fluidStorageDescriptor[fluidName] = {side = side, tank = tankIndex}
+              break
+            end
           end
         end
+        yieldToUi()
       end
     end
+    yieldToUi()
   end
 
   local skipped = {}

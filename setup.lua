@@ -5,6 +5,8 @@ local keyboard = require("keyboard")
 local unicode = require("unicode")
 local theme = require("lib.theme")
 local registry = require("registry")
+local componentScan = require("lib.component-scan-lib")
+local input = require("lib.input-lib")
 
 local gpu = component.isAvailable("gpu") and component.gpu or nil
 if not gpu then io.write("GPU not found!\n"); return end
@@ -56,28 +58,21 @@ local function drawMenu(items, sel)
   end
 end
 
--- Scanning helpers
+local function drawScanProgress()
+  clearRight()
+  gset(RX, 4, "--- SCANNING NETWORK ---", C.title, C.bg)
+  gset(RX, 5, string.rep("-", W - LEFT_W - 5), C.border, C.bg)
+  local cur, total = componentScan.getProgress()
+  local pct = total > 0 and math.floor(cur / total * 100) or 0
+  gset(RX, 7, string.format("Progress: %d / %d (%d%%)", cur, total, pct), C.text, C.bg)
+  gset(RX, 9, "Please wait, UI stays responsive...", C.dim, C.bg)
+  drawFooter({{"B", "Cancel scan"}})
+end
+
 local function scanMachinesAndTransposers()
-  local machines = {}
-  local transposers = {}
-  local interfaces = {}
-  
-  for addr, type in component.list() do
-    if type == "gt_machine" then
-      local proxy = component.proxy(addr)
-      if proxy then
-        local ok, name = pcall(proxy.getName)
-        if ok and name then
-          table.insert(machines, { address = addr, name = name })
-        end
-      end
-    elseif type == "transposer" then
-      table.insert(transposers, addr)
-    elseif type == "me_interface" then
-      table.insert(interfaces, addr)
-    end
-  end
-  return machines, transposers, interfaces
+  return componentScan.runWithUI(function()
+    drawScanProgress()
+  end, 4, 0.05)
 end
 
 -- Interactive single item selector from list
@@ -96,8 +91,12 @@ local function selectFromList(title, list, itemFormatter)
       gset(RX, 9, "Press Enter to return...", C.dim, C.bg)
       drawFooter({{"B", "Back"}})
       while true do
-        local _, _, _, code = event.pull("key_down")
-        if code == 28 or code == keyboard.keys.b or code == 1 or code == 14 then return nil end
+        local ev, _, char, code = event.pull(0.1)
+        if code == 28 or input.charMatches(char, 13)
+            or input.pressed(ev, code, char, keyboard.keys.b, string.byte("b"))
+            or input.pressed(ev, code, char, keyboard.keys.escape, 1, 14) then
+          return nil
+        end
       end
     end
     
@@ -121,21 +120,21 @@ local function selectFromList(title, list, itemFormatter)
     end
     
     drawFooter({{"Up/Dn", "Select"}, {"Enter", "Confirm"}, {"B", "Cancel"}})
-    local ev, _, _, code = event.pull("key_down")
-    if ev == "key_down" then
-      if code == 200 then -- Up
+    local ev, _, char, code = event.pull(0.1)
+    if input.isKeyEvent(ev) then
+      if code == 200 or input.pressed(ev, code, char, keyboard.keys.up) then -- Up
         if sel > 1 then
           sel = sel - 1
           if sel < scroll then scroll = sel end
         end
-      elseif code == 208 then -- Down
+      elseif code == 208 or input.pressed(ev, code, char, keyboard.keys.down) then -- Down
         if sel < #list then
           sel = sel + 1
           if sel >= scroll + viewH then scroll = sel - viewH + 1 end
         end
-      elseif code == 28 then -- Enter
+      elseif code == 28 or input.charMatches(char, 13) then -- Enter
         return list[sel]
-      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
+      elseif input.pressed(ev, code, char, keyboard.keys.b, string.byte("b"), keyboard.keys.escape, 14, 1) then
         return nil
       end
     end
@@ -159,9 +158,9 @@ local function configureWPP()
   drawFooter({{"1", "Bind WPP"}, {"2", "Reset"}, {"B", "Back"}})
   
   while true do
-    local ev, _, _, code = event.pull("key_down")
-    if ev == "key_down" then
-      if code == 2 then -- '1'
+    local ev, _, char, code = event.pull(0.1)
+    if input.isKeyEvent(ev) then
+      if code == 2 or input.charMatches(char, string.byte("1")) then -- '1'
         local machines = scanMachinesAndTransposers()
         
         -- Filter out bound addresses except current WPP address
@@ -189,10 +188,10 @@ local function configureWPP()
           return true
         end
         return false
-      elseif code == 3 then -- '2'
+      elseif code == 3 or input.charMatches(char, string.byte("2")) then -- '2'
         regData.lineController.machineAddress = nil
         return true
-      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
+      elseif input.pressed(ev, code, char, keyboard.keys.b, string.byte("b"), keyboard.keys.escape, 14, 1) then
         return false
       end
     end
@@ -236,13 +235,13 @@ local function configureTiers()
     gset(RX, H-5, "Press Enter to configure selected tier.", C.dim, C.bg)
     drawFooter({{"Up/Dn", "Select"}, {"Enter", "Configure"}, {"B", "Back"}})
     
-    local ev, _, _, code = event.pull("key_down")
-    if ev == "key_down" then
-      if code == 200 then -- Up
+    local ev, _, char, code = event.pull(0.1)
+    if input.isKeyEvent(ev) then
+      if code == 200 or input.pressed(ev, code, char, keyboard.keys.up) then
         if sel > 1 then sel = sel - 1 end
-      elseif code == 208 then -- Down
+      elseif code == 208 or input.pressed(ev, code, char, keyboard.keys.down) then
         if sel < #tiers then sel = sel + 1 end
-      elseif code == 28 then -- Enter
+      elseif code == 28 or input.charMatches(char, 13) then
         -- Configure selected tier
         local tier = tiers[sel]
         local exitTier = false
@@ -270,19 +269,25 @@ local function configureTiers()
           gset(RX, H-5, "Press number to select or B to back.", C.dim, C.bg)
           drawFooter({{"1", "Toggle State"}, {"2-9", "Bind Hardware"}, {"B", "Back"}})
           
-          local ev2, _, _, code2 = event.pull("key_down")
-          if ev2 == "key_down" then
-            if code2 == 2 then -- '1'
+          local ev2, _, char2, code2 = event.pull(0.1)
+          if input.isKeyEvent(ev2) then
+            if code2 == 2 or input.charMatches(char2, string.byte("1")) then -- '1'
               treg.enable = not treg.enable
               regData.controllers[tier.key] = treg
-            elseif code2 >= 3 and code2 <= 1 + #tier.roles + 1 then -- '2' - '9'
-              local rIdx = code2 - 2
-              local role = tier.roles[rIdx]
+            elseif input.pressed(ev2, code2, char2, keyboard.keys.b, string.byte("b"), keyboard.keys.escape, 14, 1) then
+              exitTier = true
+            else
+              local rIdx = nil
+              if char2 and char2 >= string.byte("2") and char2 <= string.byte("9") then
+                rIdx = char2 - string.byte("1")
+              elseif code2 >= 3 and code2 <= 2 + #tier.roles then
+                rIdx = code2 - 2
+              end
+              local role = rIdx and tier.roles[rIdx] or nil
               if role then
                 local _, transposers, interfaces = scanMachinesAndTransposers()
                 local rawList = role.isInterface and interfaces or transposers
-                
-                -- Filter out bound addresses, except for the current role value
+
                 local currentVal = treg[role.key]
                 local bound = {}
                 if regData.lineController.machineAddress then
@@ -297,26 +302,24 @@ local function configureTiers()
                     end
                   end
                 end
-                
+
                 local list = {}
                 for _, addr in ipairs(rawList) do
                   if not bound[addr] then
                     table.insert(list, addr)
                   end
                 end
-                
+
                 local selected = selectFromList("Select for " .. role.name, list, function(item) return item end)
                 if selected then
                   treg[role.key] = selected
                   regData.controllers[tier.key] = treg
                 end
               end
-            elseif code2 == keyboard.keys.b or code2 == 14 or code2 == 1 then -- B / Backspace / Esc
-              exitTier = true
             end
           end
         end
-      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
+      elseif input.pressed(ev, code, char, keyboard.keys.b, string.byte("b"), keyboard.keys.escape, 14, 1) then
         break
       end
     end
@@ -360,14 +363,23 @@ local function showRegistry()
   
   gset(RX, H-3, "Press any key to return...", C.dim, C.bg)
   drawFooter({{"Any Key", "Back"}})
-  event.pull("key_down")
+  input.waitKey(nil, function(ev)
+    return input.isKeyEvent(ev)
+  end)
 end
 
 local MENU_ITEMS = {
   { label = "1. Main WPP Config", fn = configureWPP },
   { label = "2. Configure Tiers", fn = configureTiers },
   { label = "3. Show Registry  ", fn = showRegistry },
-  { label = "4. Save & Exit   ", fn = function() registry.save(regData); return "exit" end }
+  { label = "4. Save & Exit   ", fn = function()
+      registry.save(regData)
+      local cd = require("lib.component-discover-lib")
+      if cd.invalidateMachineCache then
+        cd.invalidateMachineCache()
+      end
+      return "exit"
+    end }
 }
 
 local function run()
@@ -378,23 +390,24 @@ local function run()
     drawMenu(MENU_ITEMS, sel)
     drawFooter({{"Up/Dn", "Move"}, {"Enter", "Select"}, {"B", "Cancel"}})
     
-    local ev, _, _, code = event.pull("key_down")
-    if ev == "key_down" then
-      if code == 200 then -- Up
+    local ev, _, char, code = event.pull(0.1)
+    if input.isKeyEvent(ev) then
+      if code == 200 or input.pressed(ev, code, char, keyboard.keys.up) then
         if sel > 1 then sel = sel - 1 end
-      elseif code == 208 then -- Down
+      elseif code == 208 or input.pressed(ev, code, char, keyboard.keys.down) then
         if sel < #MENU_ITEMS then sel = sel + 1 end
-      elseif code == 28 then -- Enter
+      elseif code == 28 or input.charMatches(char, 13) then
         local res = MENU_ITEMS[sel].fn()
         if res == "exit" then break end
         drawFrame()
-      elseif code == keyboard.keys.b or code == 1 then -- B / Esc
+      elseif input.pressed(ev, code, char, keyboard.keys.b, string.byte("b"), keyboard.keys.escape, 1) then
         break
       end
     end
   end
-  
-  -- Restore screen
+
+  gpu.setActiveBuffer(0)
+  pcall(gpu.freeAllBuffers)
   gpu.setBackground(0x000000)
   gpu.setForeground(0xFFFFFF)
   gpu.fill(1, 1, W, H, " ")
@@ -408,5 +421,7 @@ if not ok then
   gpu.set(1, 1, "SETUP UTILITY CRASHED:")
   gpu.set(1, 3, tostring(err))
   gpu.set(1, H, "Press any key to exit...")
-  event.pull("key_down")
+  input.waitKey(nil, function(ev)
+    return input.isKeyEvent(ev)
+  end)
 end

@@ -4,6 +4,8 @@ local event = require("event")
 local stateMachineLib = require("lib.state-machine-lib")
 local componentDiscoverLib = require("lib.component-discover-lib")
 local gtSensorParserLib = require("lib.gt-sensor-parser")
+local cycleEndLib = require("lib.cycle-end-lib")
+local controllerInitLib = require("lib.controller-init-lib")
 
 local t4controller = {}
 
@@ -26,10 +28,13 @@ function t4controller:new(config)
   obj.transposerItems = {}
   obj._hadWorkDuringCycle = false
 
-  function obj:init()
+  function obj:_initBody()
     self:findMachineProxy()
+    coroutine.yield()
     self:findTransposerFluid(self.hydrochloricAcidTransposerProxy, "hydrochloricacid_gt5u")
+    coroutine.yield()
     self:findTransposerItem(self.sodiumHydroxideTransposerProxy, "Sodium Hydroxide Dust")
+    coroutine.yield()
 
     self.gtSensorParser:getInformation()
 
@@ -45,7 +50,7 @@ function t4controller:new(config)
       self.stateMachine.data.phWaitStart = require("computer").uptime()
     end
     self.stateMachine.states.work.update = function()
-      local phValue = self.gtSensorParser:getNumber(4, "Current pH Value:")
+      local phValue = self.gtSensorParser:getNumber(4, "Current pH Value:", nil, { "pH Value:", "Current pH:" })
 
       if phValue == nil then
         if require("computer").uptime() - (self.stateMachine.data.phWaitStart or 0) > 30 then
@@ -74,13 +79,22 @@ function t4controller:new(config)
 
     self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
 
-    event.listen("cycle_end", function ()
+    cycleEndLib.register(self, function()
       if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
         self.stateMachine:setState(self.stateMachine.states.idle)
       end
     end)
 
     self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:init()
+    local ok, err = controllerInitLib.runSync(self)
+    if not ok then error(tostring(err)) end
+  end
+
+  function obj:shutdown()
+    cycleEndLib.unregister(self)
   end
 
   function obj:findMachineProxy()
@@ -191,7 +205,7 @@ function t4controller:new(config)
     end
 
     local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
-    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:", nil, { "Success:", "chance:" })
 
     if successChange == nil then
       successChange = 0

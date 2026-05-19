@@ -33,6 +33,28 @@ function theme.getRes()
   return W, H
 end
 
+function theme.beginDoubleBuffer()
+  if not gpu or not gpu.allocateBuffer then
+    return nil
+  end
+  local buf = gpu.allocateBuffer(W, H)
+  if buf then
+    gpu.setActiveBuffer(buf)
+  end
+  return buf
+end
+
+function theme.endDoubleBuffer(buf)
+  if not gpu or not buf then
+    return
+  end
+  gpu.bitblt(0, 1, 1, W, H, buf, 1, 1, W, H)
+  gpu.setActiveBuffer(0)
+  if gpu.freeBuffer then
+    pcall(gpu.freeBuffer, buf)
+  end
+end
+
 function theme.gset(x, y, text, fg, bg)
   if not gpu then return end
   if fg then gpu.setForeground(fg) end

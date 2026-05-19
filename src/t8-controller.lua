@@ -4,6 +4,8 @@ local event = require("event")
 local stateMachineLib = require("lib.state-machine-lib")
 local componentDiscoverLib = require("lib.component-discover-lib")
 local gtSensorParserLib = require("lib.gt-sensor-parser")
+local cycleEndLib = require("lib.cycle-end-lib")
+local controllerInitLib = require("lib.controller-init-lib")
 
 local t8controller = {}
 
@@ -26,9 +28,21 @@ function t8controller:new(config)
 
   obj.transposerItems = {}
   obj._hadWorkDuringCycle = false
+  obj._meCraftQueue = nil
+  obj._meCraftCooldown = 4
+  obj._meCraftBatchSize = 2
 
-  function obj:init()
+  function obj:_sensorHasYes()
+    local line = #self.gtSensorParser.sensorData
+    if line < 1 then
+      return false
+    end
+    return self.gtSensorParser:stringHasAny(line, { "Yes", "yes", "YES" }) == true
+  end
+
+  function obj:_initBody()
     self:findMachineProxy()
+    coroutine.yield()
     self:findTransposerItem(self.transposerProxy, {
       "Up-Quark Releasing Catalyst",
       "Down-Quark Releasing Catalyst",
@@ -37,13 +51,14 @@ function t8controller:new(config)
       "Bottom-Quark Releasing Catalyst",
       "Top-Quark Releasing Catalyst"
     })
+    coroutine.yield()
 
     self.gtSensorParser:getInformation()
 
     self.stateMachine.states.idle = self.stateMachine:createState("Idle")
     self.stateMachine.states.idle.update = function()
       if self.controllerProxy.hasWork() then
-        if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+        if self:_sensorHasYes() then
           self.stateMachine:setState(self.stateMachine.states.waitEnd)
         else
           self.stateMachine:setState(self.stateMachine.states.putFirst)
@@ -60,7 +75,7 @@ function t8controller:new(config)
 
     self.stateMachine.states.resultPutFirst = self.stateMachine:createState("Result Put First")
     self.stateMachine.states.resultPutFirst.update = function()
-      if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+      if self:_sensorHasYes() then
         self.stateMachine:setState(self.stateMachine.states.waitEnd)
       else
         self.stateMachine:setState(self.stateMachine.states.putSecond)
@@ -76,7 +91,7 @@ function t8controller:new(config)
 
     self.stateMachine.states.resultPutSecond = self.stateMachine:createState("Result Put Second")
     self.stateMachine.states.resultPutSecond.update = function()
-      if self.gtSensorParser:stringHas(#self.gtSensorParser.sensorData, "Yes") == true then
+      if self:_sensorHasYes() then
         self.stateMachine:setState(self.stateMachine.states.waitEnd)
       else
         self.stateMachine:setState(self.stateMachine.states.putThird)
@@ -102,37 +117,68 @@ function t8controller:new(config)
     
     self.stateMachine.states.craftQuarks.update = function()
       local computer = require("computer")
-      -- Ждем пока не пройдет 3 секунды
-      if computer.uptime() < self.stateMachine.data.craftWaitTime then 
-        return 
+      if computer.uptime() < self.stateMachine.data.craftWaitTime then
+        return
       end
 
-      local quarks = self.subMeInterfaceProxy.getItemsInNetwork({name = "gregtech:gt.metaitem.03"})
+      if self._meCraftBusyUntil and computer.uptime() < self._meCraftBusyUntil then
+        return
+      end
 
-      for _, quark in pairs(quarks) do
-        if quark.label ~= "Unaligned Quark Releasing Catalyst" and quark.size < self.maxQuarkCount then
-          local crafts = self.subMeInterfaceProxy.getCraftables({label = quark.label})
-
-          if crafts[1] == nil then
-            event.push("log_warning", "[T8] No craft for: "..quark.label)
-            self.controllerProxy.setWorkAllowed(false)
-            break
+      if not self._meCraftQueue then
+        self._meCraftQueue = {}
+        local quarks = self.subMeInterfaceProxy.getItemsInNetwork({ name = "gregtech:gt.metaitem.03" })
+        for _, quark in pairs(quarks) do
+          if quark.label ~= "Unaligned Quark Releasing Catalyst" and quark.size < self.maxQuarkCount then
+            table.insert(self._meCraftQueue, quark)
           end
-
-          crafts[1].request(self.maxQuarkCount - quark.size)
         end
       end
 
+      local processed = 0
+      while #self._meCraftQueue > 0 and processed < self._meCraftBatchSize do
+        local quark = table.remove(self._meCraftQueue, 1)
+        local crafts = self.subMeInterfaceProxy.getCraftables({ label = quark.label })
+
+        if crafts[1] == nil then
+          event.push("log_warning", "[T8] No craft for: " .. quark.label)
+          self.controllerProxy.setWorkAllowed(false)
+        else
+          crafts[1].request(self.maxQuarkCount - quark.size)
+        end
+
+        processed = processed + 1
+      end
+
+      if #self._meCraftQueue > 0 then
+        self._meCraftBusyUntil = computer.uptime() + self._meCraftCooldown
+        return
+      end
+
+      self._meCraftQueue = nil
+      self._meCraftBusyUntil = nil
       self.stateMachine:setState(self.stateMachine.states.idle)
     end
 
-    event.listen("cycle_end", function ()
+    cycleEndLib.register(self, function()
       if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
+        self._meCraftQueue = nil
+        self._meCraftBusyUntil = nil
         self.stateMachine:setState(self.stateMachine.states.craftQuarks)
       end
     end)
 
     self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:init()
+    local ok, err = controllerInitLib.runSync(self)
+    if not ok then error(tostring(err)) end
+  end
+
+  function obj:shutdown()
+    cycleEndLib.unregister(self)
+    self._meCraftQueue = nil
   end
 
   function obj:findMachineProxy()
@@ -240,7 +286,7 @@ function t8controller:new(config)
     end
 
     local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
-    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:", nil, { "Success:", "chance:" })
 
     if successChange == nil then
       successChange = 0

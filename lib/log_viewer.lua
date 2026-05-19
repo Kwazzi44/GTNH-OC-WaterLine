@@ -2,6 +2,7 @@ local component = require("component")
 local event = require("event")
 local keyboard = require("keyboard")
 local theme = require("lib.theme")
+local input = require("lib.input-lib")
 
 local logViewer = {}
 
@@ -66,15 +67,7 @@ function logViewer.show(config)
   local height = endY - startY + 1
   
     local function drawScreen()
-    local hasBuf = false
-    local buf = nil
-    if gpu.allocateBuffer then
-      buf = gpu.allocateBuffer(W, H)
-      if buf then
-        gpu.setActiveBuffer(buf)
-        hasBuf = true
-      end
-    end
+    local buf = theme.beginDoubleBuffer()
 
     theme.gfill(1, 1, W, H, " ", theme.C.text, theme.C.bg)
     theme.drawHeader("WATER LINE LOG VIEWER", "LOG ANALYSIS PANEL")
@@ -159,46 +152,42 @@ function logViewer.show(config)
       theme.gset(W - 10, startY - 1, indicatorText, theme.C.title, theme.C.bg)
     end
 
-    if hasBuf then
-      gpu.bitblt(0, 1, 1, W, H, buf, 1, 1)
-      gpu.freeAllBuffers()
-    end
+    theme.endDoubleBuffer(buf)
   end
   
   drawScreen()
   
   -- Event loop for log viewer
   while true do
-    local ev, _, _, keyCode = event.pull(2)
-    
-    if ev == "key_up" then
-      if keyCode == keyboard.keys.q or keyCode == keyboard.keys.b or keyCode == keyboard.keys.escape then
+    local ev, _, char, keyCode = event.pull(0.15)
+
+    if input.isKeyEvent(ev) then
+      if input.pressed(ev, keyCode, char, keyboard.keys.q, string.byte("q"))
+          or input.pressed(ev, keyCode, char, keyboard.keys.b, string.byte("b"))
+          or input.pressed(ev, keyCode, char, keyboard.keys.escape, 1) then
         break
-      elseif keyCode == keyboard.keys.left then
+      elseif input.pressed(ev, keyCode, char, keyboard.keys.left) then
         activeFilterIdx = activeFilterIdx - 1
         if activeFilterIdx < 1 then activeFilterIdx = #filters end
         scrollOffset = 0
         drawScreen()
-      elseif keyCode == keyboard.keys.right then
+      elseif input.pressed(ev, keyCode, char, keyboard.keys.right) then
         activeFilterIdx = activeFilterIdx + 1
         if activeFilterIdx > #filters then activeFilterIdx = 1 end
         scrollOffset = 0
         drawScreen()
-      elseif keyCode == keyboard.keys.up then
+      elseif input.pressed(ev, keyCode, char, keyboard.keys.up) then
         local filteredLogs = loadAndParseLogs(filePath, filters[activeFilterIdx])
         if #filteredLogs > height then
           scrollOffset = math.min(#filteredLogs - height, scrollOffset + 1)
           drawScreen()
         end
-      elseif keyCode == keyboard.keys.down then
+      elseif input.pressed(ev, keyCode, char, keyboard.keys.down) then
         if scrollOffset > 0 then
           scrollOffset = scrollOffset - 1
           drawScreen()
         end
       end
-    elseif ev == nil then
-      -- Auto-refresh logs every 2 seconds
-      drawScreen()
     end
   end
 end

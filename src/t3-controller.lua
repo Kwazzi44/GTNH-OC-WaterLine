@@ -4,6 +4,8 @@ local event = require("event")
 local stateMachineLib = require("lib.state-machine-lib")
 local componentDiscoverLib = require("lib.component-discover-lib")
 local gtSensorParserLib = require("lib.gt-sensor-parser")
+local cycleEndLib = require("lib.cycle-end-lib")
+local controllerInitLib = require("lib.controller-init-lib")
 
 local t3controller = {}
 
@@ -26,9 +28,11 @@ function t3controller:new(config)
 
   obj.requiredCount = config.requiredCount or 900000
 
-  function obj:init()
+  function obj:_initBody()
     self:findMachineProxy()
+    coroutine.yield()
     self:findTransposerFluid(self.transposerProxy, "polyaluminiumchloride")
+    coroutine.yield()
 
     self.stateMachine.states.idle = self.stateMachine:createState("Idle")
     self.stateMachine.states.idle.update = function()
@@ -39,7 +43,8 @@ function t3controller:new(config)
 
     self.stateMachine.states.work = self.stateMachine:createState("Work")
     self.stateMachine.states.work.init = function()
-      local currentCount = self.gtSensorParser:getNumber(4, "Polyaluminium Chloride consumed this cycle: §c")
+      local currentCount = self.gtSensorParser:getNumber(4, "Polyaluminium Chloride consumed this cycle:",
+        nil, { "Polyaluminium Chloride consumed this cycle: " })
 
       if currentCount ~= nil and currentCount >= self.requiredCount then
         self.stateMachine:setState(self.stateMachine.states.waitEnd)
@@ -81,13 +86,24 @@ function t3controller:new(config)
 
     self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
 
-    event.listen("cycle_end", function ()
+    cycleEndLib.register(self, function()
       if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
         self.stateMachine:setState(self.stateMachine.states.idle)
       end
     end)
 
     self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:init()
+    local ok, err = controllerInitLib.runSync(self)
+    if not ok then
+      error(tostring(err))
+    end
+  end
+
+  function obj:shutdown()
+    cycleEndLib.unregister(self)
   end
 
   function obj:findMachineProxy()
@@ -141,7 +157,7 @@ function t3controller:new(config)
     end
 
     local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
-    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:", nil, { "Success:", "chance:" })
 
     if successChange == nil then
       successChange = 0

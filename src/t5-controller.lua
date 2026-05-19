@@ -4,6 +4,8 @@ local event = require("event")
 local stateMachineLib = require("lib.state-machine-lib")
 local componentDiscoverLib = require("lib.component-discover-lib")
 local gtSensorParserLib = require("lib.gt-sensor-parser")
+local cycleEndLib = require("lib.cycle-end-lib")
+local controllerInitLib = require("lib.controller-init-lib")
 
 local t5controller = {}
 
@@ -28,16 +30,19 @@ function t5controller:new(config)
   obj.coolantCount = config.coolantCount or 2000
   obj.plasmaCount = config.plasmaCount or 100
 
-  function obj:init()
+  function obj:_initBody()
     self:findMachineProxy()
+    coroutine.yield()
     self:findTransposerFluid(self.plasmaTransposerProxy, "plasma.helium")
+    coroutine.yield()
     self:findTransposerFluid(self.coolantTransposerProxy, "supercoolant")
+    coroutine.yield()
 
     self.gtSensorParser:getInformation()
 
     self.stateMachine.states.idle = self.stateMachine:createState("Idle")
     self.stateMachine.states.idle.init = function ()
-      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:", nil, { "temperature:", "Temp:" })
 
       if self.controllerProxy.hasWork() and temperature ~= nil and temperature ~= 0 then
         self.stateMachine:setState(self.stateMachine.states.waitEnd)
@@ -74,7 +79,7 @@ function t5controller:new(config)
       end
     end
     self.stateMachine.states.heating.update = function()
-      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:", nil, { "temperature:", "Temp:" })
 
       if self.controllerProxy.hasWork() == false then
         self.stateMachine:setState(self.stateMachine.states.idle)
@@ -99,7 +104,7 @@ function t5controller:new(config)
       end
     end
     self.stateMachine.states.cooling.update = function()
-      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:")
+      local temperature = self.gtSensorParser:getNumber(4, "Current temperature:", nil, { "temperature:", "Temp:" })
 
       if self.controllerProxy.hasWork() == false then
         self.stateMachine:setState(self.stateMachine.states.idle)
@@ -113,13 +118,22 @@ function t5controller:new(config)
 
     self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
 
-    event.listen("cycle_end", function ()
+    cycleEndLib.register(self, function()
       if self.stateMachine.currentState == self.stateMachine.states.waitEnd then
         self.stateMachine:setState(self.stateMachine.states.idle)
       end
     end)
 
     self.stateMachine:setState(self.stateMachine.states.idle)
+  end
+
+  function obj:init()
+    local ok, err = controllerInitLib.runSync(self)
+    if not ok then error(tostring(err)) end
+  end
+
+  function obj:shutdown()
+    cycleEndLib.unregister(self)
   end
 
   function obj:findMachineProxy()
@@ -174,7 +188,7 @@ function t5controller:new(config)
     end
 
     local state = self.stateMachine.currentState and self.stateMachine.currentState.name or "nil"
-    local successChange = self.gtSensorParser:getNumber(2, "Success chance:")
+    local successChange = self.gtSensorParser:getNumber(2, "Success chance:", nil, { "Success:", "chance:" })
 
     if successChange == nil then
       successChange = 0
