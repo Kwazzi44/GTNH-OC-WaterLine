@@ -44,11 +44,14 @@ local lineController = lineControllerLib:newFormConfig()
 local activeControllers = {}
 
 -- Initialize WPP Line Controller
+local lineInitOk = false
 if pcall(function() lineController:init() end) then
   mainLogger:info("WPP Line Controller initialized successfully.")
+  lineInitOk = true
 else
-  mainLogger:error("Failed to initialize WPP Line Controller. Exiting.")
-  os.exit(1)
+  mainLogger:error("Failed to initialize WPP Line Controller. Running in setup-only mode.")
+  state.line.status = "NOT BOUND"
+  state.line.color = 0xCB4B16 -- Warn color
 end
 
 -- Initialize T3-T8 controllers
@@ -110,7 +113,33 @@ while not quitFlag do
 
   -- 1. Poll WPP Line Controller
   if now - lastLinePoll >= lineInterval then
-    pcall(function() lineController:loop() end)
+    if lineInitOk and lineController.controllerProxy then
+      pcall(function()
+        lineController:loop()
+        
+        local proxy = lineController.controllerProxy
+        local allowed = true
+        pcall(function() allowed = proxy.isWorkAllowed() end)
+        
+        if not allowed then
+          state.line.status = "DISABLED"
+          state.line.progress = 0
+          state.line.maxProgress = 0
+        elseif proxy.hasWork() then
+          state.line.status = "WORKING"
+          state.line.progress = proxy.getWorkProgress()
+          state.line.maxProgress = proxy.getWorkMaxProgress()
+        else
+          state.line.status = "IDLE"
+          state.line.progress = 0
+          state.line.maxProgress = 0
+        end
+      end)
+    else
+      state.line.status = "NOT BOUND"
+      state.line.progress = 0
+      state.line.maxProgress = 0
+    end
     lastLinePoll = now
   end
 
@@ -129,30 +158,24 @@ while not quitFlag do
       local color = 0x839496 -- Theme C.text
       local ctrl = item.ctrl
       
-      if ctrl.controllerProxy then
-        local workAllowed = true
-        pcall(function() workAllowed = ctrl.controllerProxy.isWorkAllowed() end)
+      local ok, res = pcall(function() return ctrl:getState() end)
+      if ok and res then
+        stateName = res
+        -- Strip "State: " prefix
+        stateName = stateName:gsub("^State:%s*", "")
         
-        local hasWork = false
-        pcall(function() hasWork = ctrl.controllerProxy.hasWork() end)
-        
-        if not workAllowed then
-          stateName = "DISABLED"
-          color = 0x586E75 -- C.partial
-        elseif not hasWork then
-          stateName = "WAITING"
-          color = 0x2AA198 -- C.partial
-        elseif ctrl.stateMachine and ctrl.stateMachine.currentState then
-          local name = ctrl.stateMachine.currentState.name or "WORK"
-          stateName = name:upper()
-          if stateName == "IDLE" then
-            color = 0x839496 -- C.text
-          elseif stateName:find("WAIT") then
-            color = 0x268BD2 -- C.partial
-          else
-            color = 0xCB4B16 -- C.warn
-          end
+        -- Determine color based on content
+        local lowerState = stateName:lower()
+        if lowerState:find("disabled") then
+          color = 0x586E75 -- Disabled/dim color
+        elseif lowerState:find("wait") or lowerState:find("idle") then
+          color = 0x2AA198 -- Waiting/cyan color
+        else
+          color = 0xCB4B16 -- Working/warn/orange color
         end
+      else
+        stateName = "ERROR"
+        color = 0xDC322F -- Red/error
       end
       
       if state[key] then
@@ -184,8 +207,10 @@ while not quitFlag do
       os.sleep(1)
       os.execute("lua setup.lua")
       
-      -- Reboot the app after exiting setup
-      os.execute("lua main.lua")
+      -- Clean reboot
+      print("Rebooting computer...")
+      os.sleep(0.5)
+      computer.shutdown(true)
       break
     elseif keyCode == keyboard.keys.f3 then
       gui.init()

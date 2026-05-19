@@ -28,13 +28,15 @@ end
 ---@return integer[]
 ---@private
 local function getSidesForCheck(ignoreSides)
-  local sidesForCheck = {0, 1, 2, 3, 4, 5}
+  local ignoreSet = {}
+  for _, side in ipairs(ignoreSides or {}) do
+    ignoreSet[side] = true
+  end
 
-  for _, ignoreSide in pairs(ignoreSides) do
-    for sideIndex, side in pairs(sidesForCheck) do
-      if ignoreSide == side then
-        table.remove(sidesForCheck, sideIndex)
-      end
+  local sidesForCheck = {}
+  for side = 0, 5 do
+    if not ignoreSet[side] then
+      table.insert(sidesForCheck, side)
     end
   end
 

@@ -84,8 +84,20 @@ function gui.drawCard(x, y, w, h, title, status, color)
   theme.gset(x + 2, y, "[ " .. title .. " ]", theme.C.title, theme.C.bg)
   
   -- Status
+  local line1 = status
+  local line2 = ""
+  local successIdx = status:find("Success:")
+  if successIdx then
+    line1 = status:sub(1, successIdx - 1):gsub("%s+$", "")
+    line2 = status:sub(successIdx)
+  end
+
   theme.gset(x + 2, y + 2, "Status: ", theme.C.text, theme.C.bg)
-  theme.gset(x + 10, y + 2, theme.pad(status, w - 12), color, theme.C.bg)
+  theme.gset(x + 10, y + 2, theme.pad(line1, w - 12), color, theme.C.bg)
+
+  if line2 ~= "" then
+    theme.gset(x + 2, y + 3, theme.pad(line2, w - 4), color, theme.C.bg)
+  end
 end
 
 function gui.drawLogsBox()
