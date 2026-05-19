@@ -13,15 +13,22 @@ local repoUrl = "https://raw.githubusercontent.com/Kwazzi44/GTNH-OC-WaterLine/ma
 
 local files = {
   "config.lua",
+  "registry.lua",
   "main.lua",
   "lib/logger.lua",
+  "lib/theme.lua",
+  "lib/gui.lua",
+  "lib/state.lua",
+  "lib/log_viewer.lua",
   "src/line-controller.lua",
   "src/t3-controller.lua",
   "src/t4-controller.lua",
   "src/t5-controller.lua",
   "src/t6-controller.lua",
   "src/t7-controller.lua",
-  "src/t8-controller.lua"
+  "src/t8-controller.lua",
+  "setup.lua",
+  "update.lua"
 }
 
 local function downloadFile(url, path)
