@@ -163,9 +163,21 @@ local function configureWPP()
     if ev == "key_down" then
       if code == 2 then -- '1'
         local machines = scanMachinesAndTransposers()
+        
+        -- Filter out bound addresses except current WPP address
+        local currentVal = regData.lineController.machineAddress
+        local bound = {}
+        for tk, td in pairs(regData.controllers or {}) do
+          for k, v in pairs(td) do
+            if k ~= "enable" and type(v) == "string" and v ~= "" and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+              bound[v] = true
+            end
+          end
+        end
+        
         local wppCandidates = {}
         for _, m in ipairs(machines) do
-          if m.name == "multimachine.purificationplant" then
+          if m.name == "multimachine.purificationplant" and (not bound[m.address] or m.address == currentVal) then
             table.insert(wppCandidates, m)
           end
         end
@@ -268,7 +280,30 @@ local function configureTiers()
               local role = tier.roles[rIdx]
               if role then
                 local _, transposers, interfaces = scanMachinesAndTransposers()
-                local list = role.isInterface and interfaces or transposers
+                local rawList = role.isInterface and interfaces or transposers
+                
+                -- Filter out bound addresses, except for the current role value
+                local currentVal = treg[role.key]
+                local bound = {}
+                if regData.lineController.machineAddress then
+                  bound[regData.lineController.machineAddress] = true
+                end
+                for tk, td in pairs(regData.controllers or {}) do
+                  for k, v in pairs(td) do
+                    if k ~= "enable" and type(v) == "string" and v ~= "" and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+                      if v ~= currentVal then
+                        bound[v] = true
+                      end
+                    end
+                  end
+                end
+                
+                local list = {}
+                for _, addr in ipairs(rawList) do
+                  if not bound[addr] then
+                    table.insert(list, addr)
+                  end
+                end
                 
                 local selected = selectFromList("Select for " .. role.name, list, function(item) return item end)
                 if selected then

@@ -89,7 +89,7 @@ for _, e in ipairs(FILES) do
   local abs_dest = resolvePath(dest_path)
   
   -- Skip overwriting local configurations to avoid wiping user setup
-  if (src_path == "/config.lua" or src_path == "/registry.lua") and filesystem.exists(abs_dest) then
+  if (src_path == "/config.lua") and filesystem.exists(abs_dest) then
     io.write(string.format("  [SKIPPED] %-35s (File preserved)\n", dest_path))
   else
     io.write(string.format("  [..] %-35s", dest_path))
