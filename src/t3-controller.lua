@@ -40,9 +40,13 @@ function t3controller:new(config, logger)
       local success, tanks = pcall(transposer.getFluidInTank, side)
       if success and tanks then
         local fluid = tanks[1]
-        if fluid and fluid.amount > 0 and fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
-          table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
+        if fluid and fluid.amount > 0 then
+          obj.logger:debug(string.format("T3: Сторона %d имеет жидкость %s (%s) объемом %d мб", side, tostring(fluid.name), tostring(fluid.label), fluid.amount))
+          if fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
+            table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
+          end
         else
+          obj.logger:debug(string.format("T3: Сторона %d - пустой резервуар/люк", side))
           table.insert(emptyTanks, side)
         end
       end
@@ -60,8 +64,12 @@ function t3controller:new(config, logger)
       sinkSide = sidesWithFluid[#sidesWithFluid].side
     end
     
+    obj.logger:debug(string.format("T3: Найдено источника=%s, пустых приемников=%d. Итог: Источник=%s, Приемник=%s", tostring(#sidesWithFluid), #emptyTanks, tostring(sourceSide), tostring(sinkSide)))
+    
     if sourceSide and sinkSide then
+      obj.logger:debug(string.format("T3: Попытка transferFluid с %s на %s, кол-во: %d", tostring(sourceSide), tostring(sinkSide), amount))
       local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
+      obj.logger:debug(string.format("T3: Результат transferFluid: ok=%s, transferred=%s", tostring(ok), tostring(transferred)))
       if ok and transferred then
         local amt = (type(transferred) == "number" and transferred) or amount
         if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
