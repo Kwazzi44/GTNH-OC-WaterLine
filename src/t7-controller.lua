@@ -93,7 +93,7 @@ function t7controller:new(config, logger)
     
     for side = 0, 5 do
       local success, tanks = pcall(transposer.getFluidInTank, side)
-      if success and tanks and #tanks > 0 then
+      if success and tanks then
         local fluid = tanks[1]
         if fluid and fluid.amount > 0 and fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
           table.insert(sidesWithFluid, { side = side, amount = fluid.amount })

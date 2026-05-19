@@ -14,6 +14,7 @@ function t5controller:new(config, logger)
   
   obj.state = "idle"
   obj.iterations = 0
+  obj.fluidPumped = false
 
   local function getTemperature()
     if not obj.proxy then return nil end
@@ -58,7 +59,7 @@ function t5controller:new(config, logger)
     
     for side = 0, 5 do
       local success, tanks = pcall(transposer.getFluidInTank, side)
-      if success and tanks and #tanks > 0 then
+      if success and tanks then
         local fluid = tanks[1]
         if fluid and fluid.amount > 0 and fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
           table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
@@ -191,6 +192,7 @@ function t5controller:new(config, logger)
       if hasWork then
         self.logger:info("Обнаружена работа. Переход в heating.")
         self.iterations = 0
+        self.fluidPumped = false
         self.state = "heating"
         stateMod.t5.status = "HEATING"
         stateMod.t5.color = theme.C.warn
@@ -204,38 +206,45 @@ function t5controller:new(config, logger)
         return
       end
 
-      -- Добавляем плазму для нагрева
-      if self.plasmaTransposer then
-        local amount = self.config.plasmaCount or 100
-        local ok, type, transferred = transferFluidOrItem(self.plasmaTransposer, "plasma", "plasma", amount)
-        if ok then
-          self.logger:info("Нагрев: залито плазмы: " .. tostring(transferred) .. " mB")
+      -- Добавляем плазму для нагрева ОДИН раз
+      if not self.fluidPumped then
+        if self.plasmaTransposer then
+          local amount = self.config.plasmaCount or 100
+          local ok, type, transferred = transferFluidOrItem(self.plasmaTransposer, "plasma", "plasma", amount)
+          if ok then
+            self.logger:info("Нагрев: залито плазмы: " .. tostring(transferred) .. " mB")
+            self.fluidPumped = true
+          else
+            self.logger:warning("Не удалось подать плазму (проверьте буфер/бак)")
+          end
         else
-          self.logger:warning("Не удалось подать плазму (проверьте буфер/бак)")
+          self.logger:warning("Транспозер плазмы не подключен!")
         end
-      else
-        self.logger:warning("Транспозер плазмы не подключен!")
       end
       
       -- Ждем пока нагреется
       if temp and temp >= 10000 then
         self.logger:info("Температура достигла 10000. Переход в cooling.")
         self.state = "cooling"
+        self.fluidPumped = false
         stateMod.t5.status = "COOLING"
         stateMod.t5.color = theme.C.partial
       end
     elseif self.state == "cooling" then
-      -- Добавляем хладагент для охлаждения
-      if self.coolantTransposer then
-        local amount = self.config.coolantCount or 2000
-        local ok, type, transferred = transferFluidOrItem(self.coolantTransposer, "coolant", "coolant", amount)
-        if ok then
-          self.logger:info("Охлаждение: залито хладагента: " .. tostring(transferred) .. " mB")
+      -- Добавляем хладагент для охлаждения ОДИН раз
+      if not self.fluidPumped then
+        if self.coolantTransposer then
+          local amount = self.config.coolantCount or 2000
+          local ok, type, transferred = transferFluidOrItem(self.coolantTransposer, "coolant", "coolant", amount)
+          if ok then
+            self.logger:info("Охлаждение: залито хладагента: " .. tostring(transferred) .. " mB")
+            self.fluidPumped = true
+          else
+            self.logger:warning("Не удалось подать хладагент (проверьте буфер/бак)")
+          end
         else
-          self.logger:warning("Не удалось подать хладагент (проверьте буфер/бак)")
+          self.logger:warning("Транспозер хладагента не подключен!")
         end
-      else
-        self.logger:warning("Транспозер хладагента не подключен!")
       end
 
       -- Ждем пока остынет
@@ -243,6 +252,7 @@ function t5controller:new(config, logger)
         self.logger:info("Температура упала до 0. Возврат в heating, итерация +1.")
         self.iterations = self.iterations + 1
         self.state = "heating"
+        self.fluidPumped = false
         stateMod.t5.status = "HEATING"
         stateMod.t5.color = theme.C.warn
       end
