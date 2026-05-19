@@ -43,6 +43,9 @@ end
 
 local componentDiscover = {}
 
+-- Cache to store discovered machine proxies and avoid slow getName() calls
+local machineCache = nil
+
 ---Discover component proxy by address part
 ---@generic T
 ---@param address string
@@ -63,16 +66,22 @@ end
 ---@param machineName string
 ---@return gt_machine|nil
 function componentDiscover.discoverGtMachine(machineName)
-  for key, value in pairs(component.list()) do
-    if value == "gt_machine" then
-      local machineProxy = component.proxy(key, "gt_machine")
-      if machineProxy.getName() == machineName then
-        return machineProxy
+  if not machineCache then
+    machineCache = {}
+    for key, value in pairs(component.list()) do
+      if value == "gt_machine" then
+        local machineProxy = component.proxy(key, "gt_machine")
+        if machineProxy then
+          local ok, name = pcall(machineProxy.getName)
+          if ok and name then
+            machineCache[name] = machineProxy
+          end
+        end
       end
     end
   end
 
-  return nil
+  return machineCache[machineName]
 end
 
 ---Discover item storages sides connected to transposer
