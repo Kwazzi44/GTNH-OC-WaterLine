@@ -82,6 +82,43 @@ io.write("  GTNH Water Line Control — UPDATER       \n")
 io.write("==========================================\n")
 io.write("[NOTE] config.lua and registry.lua are NOT overwritten if they exist.\n\n")
 
+-- Migrate old configuration before starting the update process!
+local oldRegistryPath = resolvePath("registry.lua")
+local newRegistryPath = resolvePath("registry_data.lua")
+if filesystem.exists(oldRegistryPath) and not filesystem.exists(newRegistryPath) then
+  local ok, res = pcall(function()
+    local f = loadfile(oldRegistryPath)
+    if f then return f() end
+  end)
+  -- If it's a configuration table, copy it to the new path
+  if ok and type(res) == "table" and not res.load and not res.save then
+    local f = io.open(newRegistryPath, "w")
+    if f then
+      f:write("return {\n")
+      f:write("  lineController = {\n")
+      f:write(string.format("    machineAddress = %s,\n", res.lineController and res.lineController.machineAddress and string.format("%q", res.lineController.machineAddress) or "nil"))
+      f:write("  },\n")
+      f:write("  controllers = {\n")
+      for i = 3, 8 do
+        local tkey = "t" .. i
+        local tdata = res.controllers and res.controllers[tkey] or {}
+        f:write(string.format("    %s = {\n", tkey))
+        f:write(string.format("      enable = %s,\n", tostring(tdata.enable == true)))
+        for k, v in pairs(tdata) do
+          if k ~= "enable" then
+            f:write(string.format("      %s = %s,\n", k, v and string.format("%q", v) or "nil"))
+          end
+        end
+        f:write("    },\n")
+      end
+      f:write("  }\n")
+      f:write("}\n")
+      f:close()
+      io.write("[MIGRATED] Old registry settings migrated to registry_data.lua\n\n")
+    end
+  end
+end
+
 local ok_n, fail_n = 0, 0
 for _, e in ipairs(FILES) do
   local src_path = e[1]
