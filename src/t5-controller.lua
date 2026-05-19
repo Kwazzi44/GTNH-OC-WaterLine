@@ -8,12 +8,13 @@ local gtSensorParserLib = require("lib.gt-sensor-parser")
 local t5controller = {}
 
 function t5controller:newFormConfig(config)
-  return self:new(config.plasmaTransposerAddress, config.coolantTransposerAddress)
+  return self:new(config)
 end
 
-function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
+function t5controller:new(config)
   local obj = {}
 
+  obj.config = config
   obj.plasmaTransposerProxy = nil
   obj.coolantTransposerProxy = nil
   obj.controllerProxy = nil
@@ -22,9 +23,10 @@ function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
   obj.gtSensorParser = nil
 
   obj.transposerLiquids = {}
+  obj._hadWorkDuringCycle = false
 
-  obj.coolantCount = 2000
-  obj.plasmaCount = 100
+  obj.coolantCount = config.coolantCount or 2000
+  obj.plasmaCount = config.plasmaCount or 100
 
   function obj:init()
     self:findMachineProxy()
@@ -121,14 +123,15 @@ function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
   end
 
   function obj:findMachineProxy()
-    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitplasmaheater")
+    local machineName = self.config.machineName or "multimachine.purificationunitplasmaheater"
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine(machineName, self.config.machineAddress)
 
     if self.controllerProxy == nil then
       error("[T5] Extreme Temperature Fluctuation Purification Unit not found")
     end
 
-    self.plasmaTransposerProxy = componentDiscoverLib.discoverProxy(plasmaTransposerAddress, "[T5] Plasma Transposer", "transposer")
-    self.coolantTransposerProxy = componentDiscoverLib.discoverProxy(coolantTransposerAddress, "[T5] Coolant Transposer", "transposer")
+    self.plasmaTransposerProxy = componentDiscoverLib.discoverProxy(self.config.plasmaTransposerAddress, "[T5] Plasma Transposer", "transposer")
+    self.coolantTransposerProxy = componentDiscoverLib.discoverProxy(self.config.coolantTransposerAddress, "[T5] Coolant Transposer", "transposer")
     self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
   end
 
@@ -144,7 +147,17 @@ function t5controller:new(plasmaTransposerAddress, coolantTransposerAddress)
     end
   end
 
+  function obj:checkLocalCycleEnd()
+    local hasWork = self.controllerProxy.hasWork()
+    if self.stateMachine.currentState == self.stateMachine.states.waitEnd
+        and self._hadWorkDuringCycle and not hasWork then
+      self.stateMachine:setState(self.stateMachine.states.idle)
+    end
+    self._hadWorkDuringCycle = hasWork
+  end
+
   function obj:loop()
+    self:checkLocalCycleEnd()
     if self.controllerProxy.hasWork() then
       self.gtSensorParser:getInformation()
     end

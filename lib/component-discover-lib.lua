@@ -40,7 +40,15 @@ function componentDiscover.discoverProxy(address, name, type)
   return component.proxy(fullAddress, type)
 end
 
-function componentDiscover.discoverGtMachine(machineName)
+function componentDiscover.discoverGtMachine(machineName, machineAddress)
+  if machineAddress and machineAddress ~= "" then
+    local fullAddress = component.get(machineAddress, "gt_machine")
+    if fullAddress == nil then
+      return nil
+    end
+    return component.proxy(fullAddress)
+  end
+
   if not machineCache then
     machineCache = {}
     -- Оптимизация: ищем только среди gt_machine
@@ -55,6 +63,10 @@ function componentDiscover.discoverGtMachine(machineName)
     end
   end
   return machineCache[machineName]
+end
+
+function componentDiscover.invalidateMachineCache()
+  machineCache = nil
 end
 
 function componentDiscover.discoverTransposerItemStorageSide(proxy, ignoreSides)

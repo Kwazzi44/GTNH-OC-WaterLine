@@ -8,21 +8,14 @@ local gtSensorParserLib = require("lib.gt-sensor-parser")
 local t7controller = {}
 
 function t7controller:newFormConfig(config)
-  return self:new(
-    config.inertGasTransposerAddress,
-    config.superConductorTransposerAddress,
-    config.netroniumTransposerAddress,
-    config.coolantTransposerAddress)
+  return self:new(config)
 end
 
-function t7controller:new(
-  inertGasTransposerAddress,
-  superConductorTransposerAddress,
-  netroniumTransposerAddress,
-  coolantTransposerAddress)
+function t7controller:new(config)
 
   local obj = {}
 
+  obj.config = config
   obj.inertGasTransposerProxy = nil
   obj.superConductorTransposerProxy = nil
   obj.netroniumTransposerProxy = nil
@@ -33,6 +26,7 @@ function t7controller:new(
 
   obj.stateMachine = stateMachineLib:new()
   obj.gtSensorParser = nil
+  obj._hadWorkDuringCycle = false
 
   obj.superconductorCount = 1440
   obj.neutroniumCount = 4608
@@ -105,26 +99,27 @@ function t7controller:new(
   end
 
   function obj:findMachineProxy()
-    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitdegasifier")
+    local machineName = self.config.machineName or "multimachine.purificationunitdegasser"
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine(machineName, self.config.machineAddress)
 
     if self.controllerProxy == nil then
       error("[T7] Residual Decontaminant Degasser Purification Unit not found")
     end
 
     self.inertGasTransposerProxy = componentDiscoverLib.discoverProxy(
-      inertGasTransposerAddress,
+      self.config.inertGasTransposerAddress,
       "[T7] Inert Gas Transposer",
       "transposer")
     self.superConductorTransposerProxy = componentDiscoverLib.discoverProxy(
-      superConductorTransposerAddress,
+      self.config.superConductorTransposerAddress,
       "[T7] Super Conductor Transposer",
       "transposer")
     self.netroniumTransposerProxy = componentDiscoverLib.discoverProxy(
-      netroniumTransposerAddress,
+      self.config.netroniumTransposerAddress,
       "[T7] Netronium Transposer",
       "transposer")
     self.coolantTransposerProxy = componentDiscoverLib.discoverProxy(
-      coolantTransposerAddress,
+      self.config.coolantTransposerAddress,
       "[T7] Coolant Transposer",
       "transposer")
     self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
@@ -224,7 +219,17 @@ function t7controller:new(
     end
   end
 
+  function obj:checkLocalCycleEnd()
+    local hasWork = self.controllerProxy.hasWork()
+    if self.stateMachine.currentState == self.stateMachine.states.waitEnd
+        and self._hadWorkDuringCycle and not hasWork then
+      self.stateMachine:setState(self.stateMachine.states.idle)
+    end
+    self._hadWorkDuringCycle = hasWork
+  end
+
   function obj:loop()
+    self:checkLocalCycleEnd()
     if self.controllerProxy.hasWork() then
       self.gtSensorParser:getInformation()
     end

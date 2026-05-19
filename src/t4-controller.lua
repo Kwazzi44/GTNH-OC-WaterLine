@@ -8,12 +8,13 @@ local gtSensorParserLib = require("lib.gt-sensor-parser")
 local t4controller = {}
 
 function t4controller:newFormConfig(config)
-  return self:new(config.hydrochloricAcidTransposerAddress, config.sodiumHydroxideTransposerAddress)
+  return self:new(config)
 end
 
-function t4controller:new(hydrochloricAcidTransposerAddress, sodiumHydroxideTransposerAddress)
+function t4controller:new(config)
   local obj = {}
 
+  obj.config = config
   obj.hydrochloricAcidTransposerProxy = nil
   obj.sodiumHydroxideTransposerProxy = nil
   obj.controllerProxy = nil
@@ -23,6 +24,7 @@ function t4controller:new(hydrochloricAcidTransposerAddress, sodiumHydroxideTran
 
   obj.transposerLiquids = {}
   obj.transposerItems = {}
+  obj._hadWorkDuringCycle = false
 
   function obj:init()
     self:findMachineProxy()
@@ -39,10 +41,17 @@ function t4controller:new(hydrochloricAcidTransposerAddress, sodiumHydroxideTran
     end
 
     self.stateMachine.states.work = self.stateMachine:createState("Work")
+    self.stateMachine.states.work.init = function()
+      self.stateMachine.data.phWaitStart = require("computer").uptime()
+    end
     self.stateMachine.states.work.update = function()
       local phValue = self.gtSensorParser:getNumber(4, "Current pH Value:")
 
       if phValue == nil then
+        if require("computer").uptime() - (self.stateMachine.data.phWaitStart or 0) > 30 then
+          event.push("log_warning", "[T4] pH sensor timeout, skipping adjustment")
+          self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        end
         return
       end
 
@@ -75,18 +84,19 @@ function t4controller:new(hydrochloricAcidTransposerAddress, sodiumHydroxideTran
   end
 
   function obj:findMachineProxy()
-    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitphadjustment")
+    local machineName = self.config.machineName or "multimachine.purificationunitphadjustment"
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine(machineName, self.config.machineAddress)
 
     if self.controllerProxy == nil then
       error("[T4] pH Neutralization Purification Unit not found")
     end
 
     self.hydrochloricAcidTransposerProxy = componentDiscoverLib.discoverProxy(
-      hydrochloricAcidTransposerAddress,
+      self.config.hydrochloricAcidTransposerAddress,
       "[T4] Hydrochloric Acid Transposer",
       "transposer")
     self.sodiumHydroxideTransposerProxy = componentDiscoverLib.discoverProxy(
-      sodiumHydroxideTransposerAddress,
+      self.config.sodiumHydroxideTransposerAddress,
       "[T4] Sodium Hydroxide Transposer",
       "transposer")
     self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
@@ -152,11 +162,19 @@ function t4controller:new(hydrochloricAcidTransposerAddress, sodiumHydroxideTran
       self.controllerProxy.setWorkAllowed(false)
       event.push("log_warning", "[T4] Not enough Hydrochloric Acid for craft")
     end
+  end
 
-    self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
+  function obj:checkLocalCycleEnd()
+    local hasWork = self.controllerProxy.hasWork()
+    if self.stateMachine.currentState == self.stateMachine.states.waitEnd
+        and self._hadWorkDuringCycle and not hasWork then
+      self.stateMachine:setState(self.stateMachine.states.idle)
+    end
+    self._hadWorkDuringCycle = hasWork
   end
 
   function obj:loop()
+    self:checkLocalCycleEnd()
     if self.controllerProxy.hasWork() then
       self.gtSensorParser:getInformation()
     end

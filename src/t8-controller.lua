@@ -8,13 +8,14 @@ local gtSensorParserLib = require("lib.gt-sensor-parser")
 local t8controller = {}
 
 function t8controller:newFormConfig(config)
-  return self:new(config.maxQuarkCount, config.transposerAddress, config.subMeInterfaceAddress)
+  return self:new(config)
 end
 
-function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddress)
+function t8controller:new(config)
   local obj = {}
 
-  obj.maxQuarkCount = maxQuarkCount
+  obj.config = config
+  obj.maxQuarkCount = config.maxQuarkCount or 4
 
   obj.transposerProxy = nil
   obj.subMeInterfaceProxy = nil
@@ -24,6 +25,7 @@ function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddres
   obj.gtSensorParser = nil
 
   obj.transposerItems = {}
+  obj._hadWorkDuringCycle = false
 
   function obj:init()
     self:findMachineProxy()
@@ -51,8 +53,9 @@ function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddres
 
     self.stateMachine.states.putFirst = self.stateMachine:createState("Put First")
     self.stateMachine.states.putFirst.init = function()
-      self:putQuarks(1)
-      self.stateMachine:setState(self.stateMachine.states.resultPutFirst)
+      if self:putQuarks(1) then
+        self.stateMachine:setState(self.stateMachine.states.resultPutFirst)
+      end
     end
 
     self.stateMachine.states.resultPutFirst = self.stateMachine:createState("Result Put First")
@@ -66,8 +69,9 @@ function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddres
 
     self.stateMachine.states.putSecond = self.stateMachine:createState("Put Second")
     self.stateMachine.states.putSecond.init = function()
-      self:putQuarks(2)
-      self.stateMachine:setState(self.stateMachine.states.resultPutSecond)
+      if self:putQuarks(2) then
+        self.stateMachine:setState(self.stateMachine.states.resultPutSecond)
+      end
     end
 
     self.stateMachine.states.resultPutSecond = self.stateMachine:createState("Result Put Second")
@@ -81,8 +85,9 @@ function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddres
 
     self.stateMachine.states.putThird = self.stateMachine:createState("Put Third")
     self.stateMachine.states.putThird.init = function()
-      self:putQuarks(3)
-      self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      if self:putQuarks(3) then
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+      end
     end
 
     self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
@@ -131,18 +136,19 @@ function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddres
   end
 
   function obj:findMachineProxy()
-    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunitextractor")
+    local machineName = self.config.machineName or "multimachine.purificationunitextractor"
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine(machineName, self.config.machineAddress)
 
     if self.controllerProxy == nil then
       error("[T8] Absolute Baryonic Perfection Purification Unit not found")
     end
 
     self.transposerProxy = componentDiscoverLib.discoverProxy(
-      transposerAddress,
+      self.config.transposerAddress,
       "[T8] Transposer",
       "transposer")
     self.subMeInterfaceProxy = componentDiscoverLib.discoverProxy(
-      subMeInterfaceAddress,
+      self.config.subMeInterfaceAddress,
       "[T8] Sub Me Interface",
       "me_interface")
     self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
@@ -200,11 +206,24 @@ function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddres
       if transfered == 0 then
         self.controllerProxy.setWorkAllowed(false)
         event.push("log_warning", "[T8] Not enough quarks on slot: "..drops[index][i])
+        self.stateMachine:setState(self.stateMachine.states.waitEnd)
+        return false
       end
     end
+    return true
+  end
+
+  function obj:checkLocalCycleEnd()
+    local hasWork = self.controllerProxy.hasWork()
+    if self.stateMachine.currentState == self.stateMachine.states.waitEnd
+        and self._hadWorkDuringCycle and not hasWork then
+      self.stateMachine:setState(self.stateMachine.states.idle)
+    end
+    self._hadWorkDuringCycle = hasWork
   end
 
   function obj:loop()
+    self:checkLocalCycleEnd()
     if self.controllerProxy.hasWork() then
       self.gtSensorParser:getInformation()
     end

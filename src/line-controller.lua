@@ -3,13 +3,14 @@ local componentDiscoverLib = require("lib.component-discover-lib")
 
 local lineController = {}
 
-function lineController:newFormConfig()
-  return self:new()
+function lineController:newFormConfig(config)
+  return self:new(config or {})
 end
 
-function lineController:new()
+function lineController:new(config)
   local obj = {}
 
+  obj.config = config
   obj.controllerProxy = nil
   local lastWorkProgress = 0
 
@@ -18,7 +19,9 @@ function lineController:new()
   end
 
   function obj:findMachineProxy()
-    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationplant")
+    local lineCfg = self.config.lineController or self.config
+    local machineName = lineCfg.machineName or "multimachine.purificationplant"
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine(machineName, lineCfg.machineAddress)
 
     if self.controllerProxy == nil then
       error("[Line] Water Purification Plant not found")
@@ -47,7 +50,7 @@ function lineController:new()
       return tostring(math.ceil(self.controllerProxy.getWorkProgress() / 20)).."/"..tostring(math.ceil(self.controllerProxy.getWorkMaxProgress()/20))
     end
 
-    return "Disable"
+    return "Disabled"
   end
 
   function obj:disable()

@@ -8,12 +8,13 @@ local gtSensorParserLib = require("lib.gt-sensor-parser")
 local t6controller = {}
 
 function t6controller:newFormConfig(config)
-  return self:new(config.transposerAddress)
+  return self:new(config)
 end
 
-function t6controller:new(transposerAddress)
+function t6controller:new(config)
   local obj = {}
 
+  obj.config = config
   obj.transposerProxy = nil
   obj.controllerProxy = nil
 
@@ -21,6 +22,7 @@ function t6controller:new(transposerAddress)
   obj.gtSensorParser = nil
 
   obj.transposerItems = {}
+  obj._hadWorkDuringCycle = false
 
   function obj:init()
     self:findMachineProxy()
@@ -95,13 +97,14 @@ function t6controller:new(transposerAddress)
   end
 
   function obj:findMachineProxy()
-    self.controllerProxy = componentDiscoverLib.discoverGtMachine("multimachine.purificationunituvtreatment")
+    local machineName = self.config.machineName or "multimachine.purificationunituvtreatment"
+    self.controllerProxy = componentDiscoverLib.discoverGtMachine(machineName, self.config.machineAddress)
 
     if self.controllerProxy == nil then
       error("[T6] High Energy Laser Purification Unit not found")
     end
 
-    self.transposerProxy = componentDiscoverLib.discoverProxy(transposerAddress, "[T6] Transposer", "transposer")
+    self.transposerProxy = componentDiscoverLib.discoverProxy(self.config.transposerAddress, "[T6] Transposer", "transposer")
     self.gtSensorParser = gtSensorParserLib:new(self.controllerProxy)
   end
 
@@ -166,7 +169,17 @@ function t6controller:new(transposerAddress)
     end
   end
 
+  function obj:checkLocalCycleEnd()
+    local hasWork = self.controllerProxy.hasWork()
+    if self.stateMachine.currentState == self.stateMachine.states.waitEnd
+        and self._hadWorkDuringCycle and not hasWork then
+      self.stateMachine:setState(self.stateMachine.states.idle)
+    end
+    self._hadWorkDuringCycle = hasWork
+  end
+
   function obj:loop()
+    self:checkLocalCycleEnd()
     if self.controllerProxy.hasWork() then
       self.gtSensorParser:getInformation()
     end

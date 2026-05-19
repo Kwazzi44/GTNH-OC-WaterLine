@@ -2,6 +2,9 @@
 package.loaded.config = nil
 local config = require("config")
 local registry = require("registry")
+local state = require("lib.state")
+
+local PLACEHOLDER_ADDR = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 -- Load registry bindings and merge into config
 local regData = registry.load()
@@ -16,12 +19,14 @@ if regData.controllers then
       local c = config.controllers[tier]
       local hasAnyAddress = false
       for k, v in pairs(regConf) do
-        if v and v ~= "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" then
+        if k == "enable" then
+          c.enable = (v == true)
+        elseif v and v ~= PLACEHOLDER_ADDR then
           c[k] = v
           hasAnyAddress = true
         end
       end
-      if hasAnyAddress then
+      if regConf.enable == nil and hasAnyAddress then
         c.enable = true
       end
     end
@@ -39,19 +44,23 @@ local mainLogger = loggerLib:new(config.logger, "Main")
 mainLogger:info("Starting Water Line Control (Original Controllers Mode)...")
 
 local lineControllerLib = require("src.line-controller")
-local lineController = lineControllerLib:newFormConfig()
+local lineController = lineControllerLib:newFormConfig(config)
 
 local activeControllers = {}
 
 -- Initialize WPP Line Controller
 local lineInitOk = false
-if pcall(function() lineController:init() end) then
-  mainLogger:info("WPP Line Controller initialized successfully.")
-  lineInitOk = true
-else
-  mainLogger:error("Failed to initialize WPP Line Controller. Running in setup-only mode.")
-  state.line.status = "NOT BOUND"
-  state.line.color = 0xCB4B16 -- Warn color
+do
+  local ok, err = pcall(function() lineController:init() end)
+  if ok then
+    mainLogger:info("WPP Line Controller initialized successfully.")
+    lineInitOk = true
+  else
+    mainLogger:error("Failed to initialize WPP Line Controller: " .. tostring(err))
+    mainLogger:warning("Running in setup-only mode (tier cycle_end may use local fallback).")
+    state.line.status = "NOT BOUND"
+    state.line.color = 0xCB4B16 -- Warn color
+  end
 end
 
 -- Initialize T3-T8 controllers
@@ -79,7 +88,6 @@ for key, controllerConfig in pairs(config.controllers) do
       mainLogger:warning("Failed to load controller src/" .. key .. "-controller.lua: " .. tostring(lib))
     end
   else
-    local state = require("lib.state")
     if state[key] then
       state[key].status = "DISABLED"
       state[key].color = 0x586E75
@@ -88,7 +96,6 @@ for key, controllerConfig in pairs(config.controllers) do
 end
 
 local gui = require("lib.gui")
-local state = require("lib.state")
 local logViewer = require("lib.log_viewer")
 
 gui.init()
