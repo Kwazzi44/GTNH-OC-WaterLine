@@ -371,12 +371,10 @@ while not quitFlag do
         require("term").clear()
       end
       print("Starting setup utility...")
-      os.sleep(1)
       os.execute("lua setup.lua")
       
       -- Clean reboot
       print("Rebooting computer...")
-      os.sleep(0.5)
       computer.shutdown(true)
       break
     elseif keyCode == keyboard.keys.f3 then
