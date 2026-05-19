@@ -95,32 +95,47 @@ function t7controller:new(config, logger)
       local success, tanks = pcall(transposer.getFluidInTank, side)
       if success and tanks then
         local fluid = tanks[1]
-        if fluid and fluid.amount > 0 and fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
-          table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
+        if fluid and fluid.amount > 0 then
+          obj.logger:debug(string.format("T7: Сторона %d имеет жидкость %s (%s) объемом %d мб", side, tostring(fluid.name), tostring(fluid.label), fluid.amount))
+          if fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
+            table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
+          end
         else
+          obj.logger:debug(string.format("T7: Сторона %d - пустой резервуар/люк", side))
           table.insert(emptyTanks, side)
         end
       end
     end
     
-    local sourceSide, sinkSide = nil, nil
+    local sourceSide = nil
+    local sinkCandidates = {}
+    
     if #sidesWithFluid == 1 then
       sourceSide = sidesWithFluid[1].side
-      if #emptyTanks > 0 then
-        sinkSide = emptyTanks[1]
+      for _, side in ipairs(emptyTanks) do
+        table.insert(sinkCandidates, side)
       end
     elseif #sidesWithFluid >= 2 then
       table.sort(sidesWithFluid, function(a, b) return a.amount > b.amount end)
       sourceSide = sidesWithFluid[1].side
-      sinkSide = sidesWithFluid[#sidesWithFluid].side
+      table.insert(sinkCandidates, sidesWithFluid[#sidesWithFluid].side)
+      for _, side in ipairs(emptyTanks) do
+        table.insert(sinkCandidates, side)
+      end
     end
     
-    if sourceSide and sinkSide then
-      local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
-      if ok and transferred then
-        local amt = (type(transferred) == "number" and transferred) or amount
-        if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-          return true, "fluid", amt
+    obj.logger:debug(string.format("T7: Источник=%s, Кандидаты-приемники: %s", tostring(sourceSide), table.concat(sinkCandidates, ", ")))
+    
+    if sourceSide then
+      for _, sinkSide in ipairs(sinkCandidates) do
+        obj.logger:debug(string.format("T7: Попытка transferFluid с %d на %d, кол-во: %d", sourceSide, sinkSide, amount))
+        local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
+        obj.logger:debug(string.format("T7: Результат transferFluid с %d на %d: ok=%s, transferred=%s", sourceSide, sinkSide, tostring(ok), tostring(transferred)))
+        if ok and transferred then
+          local amt = (type(transferred) == "number" and transferred) or amount
+          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
+            return true, "fluid", amt
+          end
         end
       end
     end
@@ -150,28 +165,34 @@ function t7controller:new(config, logger)
       end
     end
     
-    local itemSourceSide, itemSinkSide = nil, nil
+    local itemSourceSide = nil
     local sourceSlot = nil
+    local itemSinkCandidates = {}
     
     if #sidesWithItem == 1 then
       itemSourceSide = sidesWithItem[1].side
       sourceSlot = sidesWithItem[1].slot
-      if #emptyInventories > 0 then
-        itemSinkSide = emptyInventories[1]
+      for _, side in ipairs(emptyInventories) do
+        table.insert(itemSinkCandidates, side)
       end
     elseif #sidesWithItem >= 2 then
       table.sort(sidesWithItem, function(a, b) return a.count > b.count end)
       itemSourceSide = sidesWithItem[1].side
       sourceSlot = sidesWithItem[1].slot
-      itemSinkSide = sidesWithItem[#sidesWithItem].side
+      table.insert(itemSinkCandidates, sidesWithItem[#sidesWithItem].side)
+      for _, side in ipairs(emptyInventories) do
+        table.insert(itemSinkCandidates, side)
+      end
     end
     
-    if itemSourceSide and itemSinkSide and sourceSlot then
-      local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
-      if ok and transferred then
-        local amt = (type(transferred) == "number" and transferred) or amount
-        if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
-          return true, "item", amt
+    if itemSourceSide and sourceSlot then
+      for _, itemSinkSide in ipairs(itemSinkCandidates) do
+        local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
+        if ok and transferred then
+          local amt = (type(transferred) == "number" and transferred) or amount
+          if (type(transferred) == "number" and transferred > 0) or (type(transferred) == "boolean" and transferred == true) then
+            return true, "item", amt
+          end
         end
       end
     end
