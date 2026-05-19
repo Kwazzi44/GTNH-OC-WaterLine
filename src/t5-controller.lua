@@ -195,7 +195,8 @@ function t5controller:new(config, logger)
 
       -- Добавляем плазму для нагрева
       if self.plasmaTransposer then
-        local ok, type, transferred = transferFluidOrItem(self.plasmaTransposer, "plasma", "plasma", 1000)
+        local amount = self.config.plasmaCount or 100
+        local ok, type, transferred = transferFluidOrItem(self.plasmaTransposer, "plasma", "plasma", amount)
         if ok then
           self.logger:info("Нагрев: залито плазмы: " .. tostring(transferred) .. " mB")
         else
@@ -215,7 +216,8 @@ function t5controller:new(config, logger)
     elseif self.state == "cooling" then
       -- Добавляем хладагент для охлаждения
       if self.coolantTransposer then
-        local ok, type, transferred = transferFluidOrItem(self.coolantTransposer, "coolant", "coolant", 1000)
+        local amount = self.config.coolantCount or 2000
+        local ok, type, transferred = transferFluidOrItem(self.coolantTransposer, "coolant", "coolant", amount)
         if ok then
           self.logger:info("Охлаждение: залито хладагента: " .. tostring(transferred) .. " mB")
         else
