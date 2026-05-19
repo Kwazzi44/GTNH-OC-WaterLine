@@ -88,8 +88,19 @@ function t8controller:new(maxQuarkCount, transposerAddress, subMeInterfaceAddres
     self.stateMachine.states.waitEnd = self.stateMachine:createState("Wait End")
 
     self.stateMachine.states.craftQuarks = self.stateMachine:createState("Craft Quarks")
+    
     self.stateMachine.states.craftQuarks.init = function()
-      os.sleep(3)
+      local computer = require("computer")
+      -- Засекаем 3 секунды ожидания без блокировки потока
+      self.stateMachine.data.craftWaitTime = computer.uptime() + 3
+    end
+    
+    self.stateMachine.states.craftQuarks.update = function()
+      local computer = require("computer")
+      -- Ждем пока не пройдет 3 секунды
+      if computer.uptime() < self.stateMachine.data.craftWaitTime then 
+        return 
+      end
 
       local quarks = self.subMeInterfaceProxy.getItemsInNetwork({name = "gregtech:gt.metaitem.03"})
 
