@@ -87,75 +87,86 @@ function t7controller:new(config, logger)
   local function transferFluidOrItem(transposer, fluidNamePart, itemNamePart, amount)
     if not transposer then return false, "no transposer" end
     
-    local sourceSide, sinkSide = nil, nil
+    -- 1. Сначала пытаемся как жидкость
+    local sidesWithFluid = {}
+    local emptyTanks = {}
+    
     for side = 0, 5 do
       local success, tanks = pcall(transposer.getFluidInTank, side)
       if success and tanks and #tanks > 0 then
         local fluid = tanks[1]
         if fluid and fluid.amount > 0 and fluid.name and (fluid.name:lower():find(fluidNamePart:lower()) or (fluid.label and fluid.label:lower():find(fluidNamePart:lower()))) then
-          sourceSide = side
+          table.insert(sidesWithFluid, { side = side, amount = fluid.amount })
         else
-          sinkSide = side
+          table.insert(emptyTanks, side)
         end
       end
     end
     
-    if sourceSide then
-      if not sinkSide then
-        for side = 0, 5 do
-          if side ~= sourceSide then
-            local success, tanks = pcall(transposer.getFluidInTank, side)
-            if success and tanks then
-              sinkSide = side
-              break
-            end
+    local sourceSide, sinkSide = nil, nil
+    if #sidesWithFluid == 1 then
+      sourceSide = sidesWithFluid[1].side
+      if #emptyTanks > 0 then
+        sinkSide = emptyTanks[1]
+      end
+    elseif #sidesWithFluid >= 2 then
+      table.sort(sidesWithFluid, function(a, b) return a.amount > b.amount end)
+      sourceSide = sidesWithFluid[1].side
+      sinkSide = sidesWithFluid[#sidesWithFluid].side
+    end
+    
+    if sourceSide and sinkSide then
+      local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
+      if ok and transferred and transferred > 0 then
+        return true, "fluid", transferred
+      end
+    end
+    
+    -- 2. Если жидкость не сработала, пытаемся как предмет
+    local sidesWithItem = {}
+    local emptyInventories = {}
+    
+    for side = 0, 5 do
+      local success, size = pcall(transposer.getInventorySize, side)
+      if success and size and size > 0 then
+        local foundCount = 0
+        local foundSlot = nil
+        for slot = 1, size do
+          local succ2, stack = pcall(transposer.getStackInSlot, side, slot)
+          if succ2 and stack and stack.size > 0 and stack.name and (stack.name:lower():find(itemNamePart:lower()) or (stack.label and stack.label:lower():find(itemNamePart:lower()))) then
+            foundCount = foundCount + stack.size
+            if not foundSlot then foundSlot = slot end
           end
         end
-      end
-      if sinkSide then
-        local ok, transferred = pcall(transposer.transferFluid, sourceSide, sinkSide, amount)
-        if ok and transferred and transferred > 0 then
-          return true, "fluid", transferred
+        
+        if foundCount > 0 then
+          table.insert(sidesWithItem, { side = side, slot = foundSlot, count = foundCount })
+        else
+          table.insert(emptyInventories, side)
         end
       end
     end
     
     local itemSourceSide, itemSinkSide = nil, nil
     local sourceSlot = nil
-    for side = 0, 5 do
-      local success, size = pcall(transposer.getInventorySize, side)
-      if success and size and size > 0 then
-        local succ2, stacks = pcall(transposer.getAllStacks, side)
-        if succ2 and stacks then
-          local slot = 1
-          for stack in stacks do
-            if stack and stack.size > 0 and stack.name and (stack.name:lower():find(itemNamePart:lower()) or (stack.label and stack.label:lower():find(itemNamePart:lower()))) then
-              itemSourceSide = side
-              sourceSlot = slot
-              break
-            end
-            slot = slot + 1
-          end
-        end
+    
+    if #sidesWithItem == 1 then
+      itemSourceSide = sidesWithItem[1].side
+      sourceSlot = sidesWithItem[1].slot
+      if #emptyInventories > 0 then
+        itemSinkSide = emptyInventories[1]
       end
+    elseif #sidesWithItem >= 2 then
+      table.sort(sidesWithItem, function(a, b) return a.count > b.count end)
+      itemSourceSide = sidesWithItem[1].side
+      sourceSlot = sidesWithItem[1].slot
+      itemSinkSide = sidesWithItem[#sidesWithItem].side
     end
     
-    if itemSourceSide then
-      for side = 0, 5 do
-        if side ~= itemSourceSide then
-          local success, size = pcall(transposer.getInventorySize, side)
-          if success and size and size > 0 then
-            itemSinkSide = side
-            break
-          end
-        end
-      end
-      
-      if itemSinkSide and sourceSlot then
-        local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
-        if ok and transferred and transferred > 0 then
-          return true, "item", transferred
-        end
+    if itemSourceSide and itemSinkSide and sourceSlot then
+      local ok, transferred = pcall(transposer.transferItem, itemSourceSide, itemSinkSide, amount, sourceSlot)
+      if ok and transferred and transferred > 0 then
+        return true, "item", transferred
       end
     end
     

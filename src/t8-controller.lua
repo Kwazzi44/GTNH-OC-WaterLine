@@ -31,11 +31,9 @@ function t8controller:new(config, logger)
   local function findItemInInventory(transposer, side, namePart)
     local success, size = pcall(transposer.getInventorySize, side)
     if not success or not size then return nil end
-    local success2, stacks = pcall(transposer.getAllStacks, side)
-    if not success2 or not stacks then return nil end
-    local slot = 1
-    for stack in stacks do
-      if stack and stack.size > 0 then
+    for slot = 1, size do
+      local success2, stack = pcall(transposer.getStackInSlot, side, slot)
+      if success2 and stack and stack.size > 0 then
         local name = stack.name or ""
         local label = stack.label or ""
         local cleanName = name:gsub("§.", ""):lower()
@@ -45,36 +43,29 @@ function t8controller:new(config, logger)
           return slot, stack
         end
       end
-      slot = slot + 1
     end
     return nil
   end
 
   local function findT8Sides(transposer)
     local chestSide, machineSide = nil, nil
+    local maxSlots = -1
+    local minSlots = 99999
     for side = 0, 5 do
       local success, size = pcall(transposer.getInventorySize, side)
       if success and size and size > 0 then
-        local slot = findItemInInventory(transposer, side, "quark")
-        if slot then
+        if size > maxSlots then
+          maxSlots = size
           chestSide = side
-        else
+        end
+        if size < minSlots then
+          minSlots = size
           machineSide = side
         end
       end
     end
-    if not chestSide or not machineSide then
-      local sidesWithInv = {}
-      for side = 0, 5 do
-        local success, size = pcall(transposer.getInventorySize, side)
-        if success and size and size > 0 then
-          table.insert(sidesWithInv, side)
-        end
-      end
-      if #sidesWithInv >= 2 then
-        chestSide = sidesWithInv[1]
-        machineSide = sidesWithInv[2]
-      end
+    if chestSide == machineSide then
+      return 0, 1
     end
     return chestSide, machineSide
   end
