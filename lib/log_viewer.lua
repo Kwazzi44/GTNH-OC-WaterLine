@@ -71,7 +71,7 @@ function logViewer.show(config)
     theme.drawFooter({
       {"Left/Right", "Filter"},
       {"Up/Down", "Scroll"},
-      {"Esc/Q", "Back to Hub"},
+      {"B/Q", "Back to Hub"},
     })
     
     -- Draw filter panel
@@ -157,7 +157,7 @@ function logViewer.show(config)
     local ev, _, _, keyCode = event.pull(2, "key_up")
     
     if ev == "key_up" then
-      if keyCode == keyboard.keys.q or keyCode == keyboard.keys.escape then
+      if keyCode == keyboard.keys.q or keyCode == keyboard.keys.b or keyCode == keyboard.keys.escape then
         break
       elseif keyCode == keyboard.keys.left then
         activeFilterIdx = activeFilterIdx - 1

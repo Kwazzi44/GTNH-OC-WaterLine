@@ -94,10 +94,10 @@ local function selectFromList(title, list, itemFormatter)
     if #list == 0 then
       gset(RX, 7, "No compatible components found on network.", C.warn, C.bg)
       gset(RX, 9, "Press Enter to return...", C.dim, C.bg)
-      drawFooter({{"Enter", "Back"}})
+      drawFooter({{"B", "Back"}})
       while true do
         local _, _, _, code = event.pull("key_down")
-        if code == 28 or code == 1 then return nil end
+        if code == 28 or code == keyboard.keys.b or code == 1 or code == 14 then return nil end
       end
     end
     
@@ -120,7 +120,7 @@ local function selectFromList(title, list, itemFormatter)
       end
     end
     
-    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Confirm"}, {"Esc", "Cancel"}})
+    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Confirm"}, {"B", "Cancel"}})
     local ev, _, _, code = event.pull("key_down")
     if ev == "key_down" then
       if code == 200 then -- Up
@@ -135,7 +135,7 @@ local function selectFromList(title, list, itemFormatter)
         end
       elseif code == 28 then -- Enter
         return list[sel]
-      elseif code == 1 or code == 14 then -- Esc / Backspace
+      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
         return nil
       end
     end
@@ -154,9 +154,9 @@ local function configureWPP()
   
   gset(RX, 10, "1. Bind new WPP address from network", C.text, C.bg)
   gset(RX, 11, "2. Reset to autodetect mode", C.text, C.bg)
-  gset(RX, 13, "Press [Esc] to return", C.dim, C.bg)
+  gset(RX, 13, "Press [B] to return", C.dim, C.bg)
   
-  drawFooter({{"1", "Bind WPP"}, {"2", "Reset"}, {"Esc", "Back"}})
+  drawFooter({{"1", "Bind WPP"}, {"2", "Reset"}, {"B", "Back"}})
   
   while true do
     local ev, _, _, code = event.pull("key_down")
@@ -180,7 +180,7 @@ local function configureWPP()
       elseif code == 3 then -- '2'
         regData.lineController.machineAddress = nil
         return true
-      elseif code == 1 or code == 14 then -- Esc
+      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
         return false
       end
     end
@@ -222,7 +222,7 @@ local function configureTiers()
     end
     
     gset(RX, H-5, "Press Enter to configure selected tier.", C.dim, C.bg)
-    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Configure"}, {"Esc", "Back"}})
+    drawFooter({{"Up/Dn", "Select"}, {"Enter", "Configure"}, {"B", "Back"}})
     
     local ev, _, _, code = event.pull("key_down")
     if ev == "key_down" then
@@ -255,8 +255,8 @@ local function configureTiers()
             y = y + 1
           end
           
-          gset(RX, H-5, "Press number to select or Esc to back.", C.dim, C.bg)
-          drawFooter({{"1", "Toggle State"}, {"2-9", "Bind Hardware"}, {"Esc", "Back"}})
+          gset(RX, H-5, "Press number to select or B to back.", C.dim, C.bg)
+          drawFooter({{"1", "Toggle State"}, {"2-9", "Bind Hardware"}, {"B", "Back"}})
           
           local ev2, _, _, code2 = event.pull("key_down")
           if ev2 == "key_down" then
@@ -276,12 +276,12 @@ local function configureTiers()
                   regData.controllers[tier.key] = treg
                 end
               end
-            elseif code2 == 1 or code2 == 14 then -- Esc
+            elseif code2 == keyboard.keys.b or code2 == 14 or code2 == 1 then -- B / Backspace / Esc
               exitTier = true
             end
           end
         end
-      elseif code == 1 or code == 14 then -- Esc
+      elseif code == keyboard.keys.b or code == 14 or code == 1 then -- B / Backspace / Esc
         break
       end
     end
@@ -341,7 +341,7 @@ local function run()
   
   while true do
     drawMenu(MENU_ITEMS, sel)
-    drawFooter({{"Up/Dn", "Move"}, {"Enter", "Select"}, {"Esc", "Cancel"}})
+    drawFooter({{"Up/Dn", "Move"}, {"Enter", "Select"}, {"B", "Cancel"}})
     
     local ev, _, _, code = event.pull("key_down")
     if ev == "key_down" then
@@ -353,7 +353,7 @@ local function run()
         local res = MENU_ITEMS[sel].fn()
         if res == "exit" then break end
         drawFrame()
-      elseif code == 1 then -- Esc
+      elseif code == keyboard.keys.b or code == 1 then -- B / Esc
         break
       end
     end
