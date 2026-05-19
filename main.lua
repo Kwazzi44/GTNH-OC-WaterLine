@@ -1,3 +1,5 @@
+package.path = "/home/?.lua;/home/?/init.lua;" .. package.path
+
 local thread = require("thread")
 local event = require("event")
 local keyboard = require("keyboard")
